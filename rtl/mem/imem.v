@@ -16,8 +16,11 @@ module imem #(
     parameter CACHE_LINES = 64
 )(
     input  wire        clk,
+    input  wire        rst_n,
     input  wire [31:0] addr,
-    output wire [31:0] rdata
+    output wire [31:0] rdata,
+    input  wire [31:0] addr1,
+    output wire [31:0] rdata1
 );
     localparam MEM_IDX_W   = $clog2(MEM_WORDS);
     localparam CACHE_IDX_W = $clog2(CACHE_LINES);
@@ -40,7 +43,15 @@ module imem #(
     wire [TAG_W-1:0]       c_tg  = addr[31:CACHE_IDX_W+2];
     wire [MEM_IDX_W-1:0]   m_idx = addr[MEM_IDX_W+1:2];
 
-    wire hit = c_valid[c_idx] && (c_tag[c_idx] == c_tg);
+    wire hit = (c_valid[c_idx] == 1'b1) && (c_tag[c_idx] == c_tg);
+
+    wire [CACHE_IDX_W-1:0] c_idx1 = addr1[CACHE_IDX_W+1:2];
+    wire [TAG_W-1:0]       c_tg1  = addr1[31:CACHE_IDX_W+2];
+    wire [MEM_IDX_W-1:0]   m_idx1 = addr1[MEM_IDX_W+1:2];
+
+    wire hit1 = (c_valid[c_idx1] == 1'b1) && (c_tag[c_idx1] == c_tg1);
+    wire [1:0] hit_count = {1'b0, hit} + {1'b0, hit1};
+    wire [1:0] miss_count = 2 - hit_count;
 
     integer i;
     initial begin
@@ -58,17 +69,30 @@ module imem #(
 
     // 组合读：hit 取 cache，miss 直接取主存
     assign rdata = hit ? c_data[c_idx] : mem[m_idx];
+    assign rdata1 = hit1 ? c_data[c_idx1] : mem[m_idx1];
 
     // miss 回填
     always @(posedge clk) begin
-        stat_access <= stat_access + 1;
-        if (hit) stat_hit <= stat_hit + 1;
-        else     stat_miss <= stat_miss + 1;
+        if (!rst_n) begin
+            stat_access <= 0;
+            stat_hit    <= 0;
+            stat_miss   <= 0;
+        end else begin
+            stat_access <= stat_access + 2;
+            stat_hit    <= stat_hit + hit_count;
+            stat_miss   <= stat_miss + miss_count;
 
-        if (!hit) begin
-            c_valid[c_idx] <= 1'b1;
-            c_tag[c_idx]   <= c_tg;
-            c_data[c_idx]  <= mem[m_idx];
+            if (!hit) begin
+                c_valid[c_idx] <= 1'b1;
+                c_tag[c_idx]   <= c_tg;
+                c_data[c_idx]  <= mem[m_idx];
+            end
+
+            if (!hit1) begin
+                c_valid[c_idx1] <= 1'b1;
+                c_tag[c_idx1]   <= c_tg1;
+                c_data[c_idx1]  <= mem[m_idx1];
+            end
         end
     end
 endmodule

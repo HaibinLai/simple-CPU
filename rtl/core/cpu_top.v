@@ -97,12 +97,15 @@ module cpu_top (
     // 来自 ID 的 stall
     wire        stall;
 
-    wire [31:0] imem_rdata;
+    wire [31:0] imem_rdata0, imem_rdata1;
 
     imem #(.HEX_FILE(`PROG_HEX)) u_imem (
         .clk   (clk),
+        .rst_n (rst_n),
         .addr  (pc),
-        .rdata (imem_rdata)
+        .rdata (imem_rdata0),
+        .addr1 (pc_plus4),
+        .rdata1(imem_rdata1)
     );
 
     // 分支预测器
@@ -134,82 +137,114 @@ module cpu_top (
         else                   pc <= pc_next_seq;
     end
 
-    // IF/ID1 流水线寄存器
-    reg [31:0] if_id_pc;
-    reg [31:0] if_id_instr;
-    reg        if_id_valid;
+    // IF/ID1 流水线寄存器（Milestone 1: dual-slot front-end bundle）
+    reg [31:0] if_id_pc0;
+    reg [31:0] if_id_instr0;
+    reg        if_id_valid0;
+    reg [31:0] if_id_pc1;
+    reg [31:0] if_id_instr1;
+    reg        if_id_valid1;
     reg        if_id_pred_taken;
     reg [31:0] if_id_pred_target;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            if_id_pc          <= 32'b0;
-            if_id_instr       <= 32'h00000013; // NOP
-            if_id_valid       <= 1'b0;
+            if_id_pc0         <= 32'b0;
+            if_id_instr0      <= 32'h00000013; // NOP
+            if_id_valid0      <= 1'b0;
+            if_id_pc1         <= 32'b0;
+            if_id_instr1      <= 32'h00000013;
+            if_id_valid1      <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
         end else if (ex_redirect) begin
             // 刷新 IF/ID1（注入气泡）
-            if_id_pc          <= 32'b0;
-            if_id_instr       <= 32'h00000013;
-            if_id_valid       <= 1'b0;
+            if_id_pc0         <= 32'b0;
+            if_id_instr0      <= 32'h00000013;
+            if_id_valid0      <= 1'b0;
+            if_id_pc1         <= 32'b0;
+            if_id_instr1      <= 32'h00000013;
+            if_id_valid1      <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
         end else if (stall) begin
             // 冻结 IF/ID1：保持当前值
-            if_id_pc          <= if_id_pc;
-            if_id_instr       <= if_id_instr;
-            if_id_valid       <= if_id_valid;
+            if_id_pc0         <= if_id_pc0;
+            if_id_instr0      <= if_id_instr0;
+            if_id_valid0      <= if_id_valid0;
+            if_id_pc1         <= if_id_pc1;
+            if_id_instr1      <= if_id_instr1;
+            if_id_valid1      <= if_id_valid1;
             if_id_pred_taken  <= if_id_pred_taken;
             if_id_pred_target <= if_id_pred_target;
         end else begin
-            if_id_pc          <= pc;
-            if_id_instr       <= imem_rdata;
-            if_id_valid       <= 1'b1;
+            if_id_pc0         <= pc;
+            if_id_instr0      <= imem_rdata0;
+            if_id_valid0      <= 1'b1;
+            if_id_pc1         <= pc_plus4;
+            if_id_instr1      <= imem_rdata1;
+            // slot1 is currently carried as bundle lookahead; backend remains single-issue on slot0.
+            if_id_valid1      <= ~bpu_pred_taken;
             if_id_pred_taken  <= bpu_pred_taken;
             if_id_pred_target <= bpu_pred_target;
         end
     end
 
     // ID1/ID2 流水线寄存器
-    reg [31:0] id1_id2_pc;
-    reg [31:0] id1_id2_instr;
-    reg        id1_id2_valid;
+    reg [31:0] id1_id2_pc0;
+    reg [31:0] id1_id2_instr0;
+    reg        id1_id2_valid0;
+    reg [31:0] id1_id2_pc1;
+    reg [31:0] id1_id2_instr1;
+    reg        id1_id2_valid1;
     reg        id1_id2_pred_taken;
     reg [31:0] id1_id2_pred_target;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            id1_id2_pc          <= 32'b0;
-            id1_id2_instr       <= 32'h00000013;
-            id1_id2_valid       <= 1'b0;
+            id1_id2_pc0         <= 32'b0;
+            id1_id2_instr0      <= 32'h00000013;
+            id1_id2_valid0      <= 1'b0;
+            id1_id2_pc1         <= 32'b0;
+            id1_id2_instr1      <= 32'h00000013;
+            id1_id2_valid1      <= 1'b0;
             id1_id2_pred_taken  <= 1'b0;
             id1_id2_pred_target <= 32'b0;
         end else if (ex_redirect) begin
             // 刷新 ID2
-            id1_id2_pc          <= 32'b0;
-            id1_id2_instr       <= 32'h00000013;
-            id1_id2_valid       <= 1'b0;
+            id1_id2_pc0         <= 32'b0;
+            id1_id2_instr0      <= 32'h00000013;
+            id1_id2_valid0      <= 1'b0;
+            id1_id2_pc1         <= 32'b0;
+            id1_id2_instr1      <= 32'h00000013;
+            id1_id2_valid1      <= 1'b0;
             id1_id2_pred_taken  <= 1'b0;
             id1_id2_pred_target <= 32'b0;
         end else if (stall) begin
             // 冻结 ID2
-            id1_id2_pc          <= id1_id2_pc;
-            id1_id2_instr       <= id1_id2_instr;
-            id1_id2_valid       <= id1_id2_valid;
+            id1_id2_pc0         <= id1_id2_pc0;
+            id1_id2_instr0      <= id1_id2_instr0;
+            id1_id2_valid0      <= id1_id2_valid0;
+            id1_id2_pc1         <= id1_id2_pc1;
+            id1_id2_instr1      <= id1_id2_instr1;
+            id1_id2_valid1      <= id1_id2_valid1;
             id1_id2_pred_taken  <= id1_id2_pred_taken;
             id1_id2_pred_target <= id1_id2_pred_target;
         end else begin
-            id1_id2_pc          <= if_id_pc;
-            id1_id2_instr       <= if_id_instr;
-            id1_id2_valid       <= if_id_valid;
+            id1_id2_pc0         <= if_id_pc0;
+            id1_id2_instr0      <= if_id_instr0;
+            id1_id2_valid0      <= if_id_valid0;
+            id1_id2_pc1         <= if_id_pc1;
+            id1_id2_instr1      <= if_id_instr1;
+            id1_id2_valid1      <= if_id_valid1;
             id1_id2_pred_taken  <= if_id_pred_taken;
             id1_id2_pred_target <= if_id_pred_target;
         end
     end
 
     // ---------------- ID2 ----------------
-    wire [31:0] id_instr = id1_id2_instr;
+    // Milestone 1 keeps the backend single-issue; slot0 remains the only consumer.
+    wire [31:0] id_instr = id1_id2_instr0;
     wire [6:0]  id_opcode= id_instr[6:0];
     wire [4:0]  id_rs1   = id_instr[19:15];
     wire [4:0]  id_rs2   = id_instr[24:20];
@@ -263,23 +298,112 @@ module cpu_top (
         .imm      (id_imm)
     );
 
+    // ===== Milestone 1.5: ID2 Slot1 Decode Pairing Logic =====
+    // Slot1 decode：独立检查slot1指令的可行性
+    wire [31:0] id1_instr = id1_id2_instr1;
+    wire [6:0]  id1_opcode= id1_instr[6:0];
+    wire [4:0]  id1_rs1   = id1_instr[19:15];
+    wire [4:0]  id1_rs2   = id1_instr[24:20];
+    wire [4:0]  id1_rd    = id1_instr[11:7];
+
+    // Slot1 ALU-only 约束：仅允许 ALU 指令（OP_IMM 或 OP_REG）
+    wire id1_is_alu_only = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
+
+    // Slot1 control 解码（仅供约束检查；暂不用于执行）
+    wire [2:0] id1_imm_type;
+    wire       id1_a_src, id1_b_src;
+    wire [3:0] id1_alu_op;
+    wire [2:0] id1_br_type;
+    wire       id1_is_jump;
+    wire       id1_mem_read, id1_mem_write;
+    wire [2:0] id1_mem_funct3;
+    wire       id1_reg_write;
+    wire [1:0] id1_wb_sel;
+    wire       id1_is_ecall, id1_is_mret, id1_is_illegal;
+
+    control u_ctrl_slot1 (
+        .instr      (id1_instr),
+        .imm_type   (id1_imm_type),
+        .a_src      (id1_a_src),
+        .b_src      (id1_b_src),
+        .alu_op     (id1_alu_op),
+        .br_type    (id1_br_type),
+        .is_jump    (id1_is_jump),
+        .mem_read   (id1_mem_read),
+        .mem_write  (id1_mem_write),
+        .mem_funct3 (id1_mem_funct3),
+        .reg_write  (id1_reg_write),
+        .wb_sel     (id1_wb_sel),
+        .is_ecall   (id1_is_ecall),
+        .is_mret    (id1_is_mret),
+        .is_illegal (id1_is_illegal)
+    );
+
+    // Slot1 配对约束：
+    // 1. Slot1 有效 && 是 ALU-only 指令
+    // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
+    wire id1_no_raw_hazard = ~(
+        (id_reg_write && (id_rd != 5'd0)) && (
+            ((id1_rs1 == id_rd) && (id1_rs1 != 5'd0)) ||
+            ((id1_rs2 == id_rd) && (id1_rs2 != 5'd0))
+        )
+    );
+
+    // Slot1 issue 条件（仅在后续 Milestone 2 中才会真正 issue；当前用于验证）
+    wire id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only && id1_no_raw_hazard;
+    wire id2_issue_slot0 = id1_id2_valid0;
+
     // 寄存器堆（写口接到 WB）
     wire        wb_we;
     wire [4:0]  wb_rd;
     wire [31:0] wb_data;
 
+    // Slot0 read outputs
     wire [31:0] id_rs1_data, id_rs2_data;
+    
+    // Slot1 read outputs (Milestone 2)
+    wire [31:0] id1_rs1_data, id1_rs2_data;
+    
+    // Slot1 write ports (Milestone 2, not yet enabled)
+    wire        slot1_wb_we;
+    wire [4:0]  slot1_wb_rd;
+    wire [31:0] slot1_wb_data;
+    
     regfile u_rf (
         .clk      (clk),
         .rst_n    (rst_n),
+        // Slot0 read ports
         .rs1_addr (id_rs1),
         .rs2_addr (id_rs2),
         .rs1_data (id_rs1_data),
         .rs2_data (id_rs2_data),
-        .we       (wb_we),
-        .rd_addr  (wb_rd),
-        .rd_data  (wb_data)
+        // Slot1 read ports (new)
+        .rs3_addr (id1_rs1),
+        .rs4_addr (id1_rs2),
+        .rs3_data (id1_rs1_data),
+        .rs4_data (id1_rs2_data),
+        // Slot0 write port
+        .we0      (wb_we),
+        .rd0_addr (wb_rd),
+        .rd0_data (wb_data),
+        // Slot1 write port (new)
+        .we1      (slot1_wb_we),
+        .rd1_addr (slot1_wb_rd),
+        .rd1_data (slot1_wb_data)
     );
+
+    // ===== Milestone 2: Slot1 ID/EX Pipeline Registers (Phase 2B) =====
+    reg [31:0] id1_ex_pc;
+    reg [31:0] id1_ex_instr;
+    reg [31:0] id1_ex_rs1, id1_ex_rs2, id1_ex_imm;
+    reg [4:0]  id1_ex_rs1_addr, id1_ex_rs2_addr;
+    reg [4:0]  id1_ex_rd;
+    reg [3:0]  id1_ex_alu_op;
+    reg        id1_ex_a_src, id1_ex_b_src;
+    reg        id1_ex_reg_write;
+    reg [1:0]  id1_ex_wb_sel;
+    reg        id1_ex_valid;
+    reg [2:0]  id1_ex_imm_type;
 
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
@@ -313,6 +437,49 @@ module cpu_top (
         .id_use_rs2     (id_use_rs2),
         .stall          (stall)
     );
+
+    // ===== Milestone 2: Slot1 ID/EX Pipeline Update (Phase 2B) =====
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            id1_ex_pc         <= 32'b0;
+            id1_ex_instr      <= 32'h00000013;
+            id1_ex_rs1        <= 32'b0;
+            id1_ex_rs2        <= 32'b0;
+            id1_ex_imm        <= 32'b0;
+            id1_ex_rs1_addr   <= 5'b0;
+            id1_ex_rs2_addr   <= 5'b0;
+            id1_ex_rd         <= 5'b0;
+            id1_ex_alu_op     <= `ALU_ADD;
+            id1_ex_a_src      <= 1'b0;
+            id1_ex_b_src      <= 1'b0;
+            id1_ex_reg_write  <= 1'b0;
+            id1_ex_wb_sel     <= `WB_ALU;
+            id1_ex_valid      <= 1'b0;
+            id1_ex_imm_type   <= `IMM_NONE;
+        end else if (ex_redirect || stall) begin
+            // 刷新/气泡 slot1
+            id1_ex_instr      <= 32'h00000013;
+            id1_ex_rd         <= 5'b0;
+            id1_ex_reg_write  <= 1'b0;
+            id1_ex_valid      <= 1'b0;
+        end else begin
+            id1_ex_pc         <= id1_id2_pc1;
+            id1_ex_instr      <= id1_instr;
+            id1_ex_rs1        <= id1_rs1_data;        // slot1 读寄存器
+            id1_ex_rs2        <= id1_rs2_data;        // slot1 读寄存器
+            id1_ex_imm        <= id_imm;              // slot0 产生的立即数，对 slot1 不适用；仅 PHase 2C 使用
+            id1_ex_rs1_addr   <= id1_rs1;
+            id1_ex_rs2_addr   <= id1_rs2;
+            id1_ex_rd         <= id1_rd;
+            id1_ex_alu_op     <= id1_alu_op;
+            id1_ex_a_src      <= id1_a_src;
+            id1_ex_b_src      <= id1_b_src;
+            id1_ex_reg_write  <= id1_reg_write;
+            id1_ex_wb_sel     <= id1_wb_sel;
+            id1_ex_valid      <= id2_issue_slot1;     // 仅当 slot1 满足配对条件时，流水线才推进
+            id1_ex_imm_type   <= id1_imm_type;
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -356,7 +523,7 @@ module cpu_top (
             id_ex_pred_taken  <= 1'b0;
             id_ex_pred_target <= 32'b0;
         end else begin
-            id_ex_pc          <= id1_id2_pc;
+            id_ex_pc          <= id1_id2_pc0;
             id_ex_instr       <= id_instr;
             id_ex_rs1         <= id_rs1_data;
             id_ex_rs2         <= id_rs2_data;
@@ -374,7 +541,7 @@ module cpu_top (
             id_ex_mem_funct3  <= id_mem_funct3;
             id_ex_reg_write   <= id_reg_write;
             id_ex_wb_sel      <= id_wb_sel;
-            id_ex_valid       <= id1_id2_valid;
+            id_ex_valid       <= id1_id2_valid0;
             id_ex_is_ecall    <= id_is_ecall;
             id_ex_is_mret     <= id_is_mret;
             id_ex_is_illegal  <= id_is_illegal;
@@ -433,6 +600,40 @@ module cpu_top (
         .y  (ex_alu_y)
     );
 
+    // ===== Milestone 2: Slot1 ALU Datapath (Phase 2C) =====
+    // Slot1 forwarding: Simpler than slot0 (no AGU/MEM stages for slot1)
+    // Slot1 可以从 slot0 EX 结果、slot0 WB 结果或自己的 WB 结果获取
+    wire [31:0] slot1_rs1_fwd =
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == id_ex_rd && id_ex_valid && id_ex_reg_write) ? ex_alu_y :
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
+                           id1_ex_rs1;
+    wire [31:0] slot1_rs2_fwd =
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == id_ex_rd && id_ex_valid && id_ex_reg_write) ? ex_alu_y :
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
+                           id1_ex_rs2;
+
+    // Slot1 ALU input (ALU-only, so a_src is always RS1, b_src is IMM or RS2)
+    // For ALU-only, imm_gen output can be reused or computed on-the-fly
+    wire [31:0] slot1_imm;
+    imm_gen u_imm_slot1 (
+        .instr    (id1_ex_instr),
+        .imm_type (id1_ex_imm_type),
+        .imm      (slot1_imm)
+    );
+
+    wire [31:0] slot1_a = slot1_rs1_fwd;  // ALU-only, always use rs1
+    wire [31:0] slot1_b = (id1_ex_b_src == `BSRC_IMM) ? slot1_imm : slot1_rs2_fwd;
+
+    wire [31:0] slot1_alu_y;
+    alu u_alu_slot1 (
+        .op (id1_ex_alu_op),
+        .a  (slot1_a),
+        .b  (slot1_b),
+        .y  (slot1_alu_y)
+    );
+
+    // Slot1 分支判断使用前递后的 rs1/rs2（仅用于验证，slot1 不会有分支）
+    
     // 分支判断使用前递后的 rs1/rs2
     wire ex_br_taken;
     branch_unit u_bu (
@@ -679,6 +880,13 @@ module cpu_top (
     assign wb_rd   = mem_wb_rd;
     assign wb_we   = mem_wb_reg_write & mem_wb_valid;
     assign wb_data = (mem_wb_wb_sel == `WB_MEM) ? mem_wb_load : mem_wb_alu_y;
+
+    // ===== Milestone 2: Slot1 Direct Write-Back (Phase 2D - DEFERRED) =====
+    // 暂时禁用 slot1 写回，因为 PC 推进逻辑需要先支持 +8 双发射
+    // 否则 slot1 在 EX1 写回后，下一周期 slot0 会重复执行同一条指令
+    assign slot1_wb_we   = 1'b0;
+    assign slot1_wb_rd   = 5'b0;
+    assign slot1_wb_data = 32'b0;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
