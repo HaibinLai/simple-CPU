@@ -14,6 +14,11 @@ IF  →  ID1  →  ID2  →  EX1  →  EX2  →  AGU  →  MEM  →  WB
 
 ## Current Status
 
+Planning documents for near-term architecture work:
+
+- `docs/8stage-implementation-plan.md` — current 8-stage structural evolution plan.
+- `docs/2issue-implementation-plan.md` — proposed constrained 2-issue in-order upgrade plan.
+
 ## Course Roadmap: From 5 Stages to 10 Stages
 
 This repository can also serve as the implementation base for an architecture course sequence that starts from a classic 5-stage pipeline and gradually evolves toward a deeper 10-stage design.
