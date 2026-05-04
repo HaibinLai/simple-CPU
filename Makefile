@@ -4,11 +4,12 @@ RTL := $(wildcard rtl/core/*.v) $(wildcard rtl/mem/*.v)
 TB  := tb/tb_cpu.v
 TOP := tb_cpu
 
-SIM_DIR := sim
+SIM_DIR ?= sim
 VVP     := $(SIM_DIR)/cpu.vvp
 VCD     := $(SIM_DIR)/cpu.vcd
 
 PROG ?= tb/programs/test01.hex
+TIMEOUT_NS ?= 2000
 
 .PHONY: all run wave clean build
 
@@ -16,7 +17,7 @@ all: build
 
 # 每次都重新编译，避免 PROG 切换时使用旧的 VVP
 build: | $(SIM_DIR)
-	iverilog -g2012 -I rtl/core -DPROG_HEX='"$(PROG)"' -o $(VVP) -s $(TOP) $(RTL) $(TB)
+	iverilog -g2012 -I rtl/core -DPROG_HEX='"$(PROG)"' -DSIM_TIMEOUT_NS=$(TIMEOUT_NS) -o $(VVP) -s $(TOP) $(RTL) $(TB)
 
 $(SIM_DIR):
 	mkdir -p $(SIM_DIR)

@@ -9,6 +9,10 @@
   `define PROG_HEX "tb/programs/test01.hex"
 `endif
 
+`ifndef SIM_TIMEOUT_NS
+  `define SIM_TIMEOUT_NS 2000
+`endif
+
 module tb_cpu;
     reg clk = 0;
     reg rst_n = 0;
@@ -31,9 +35,16 @@ module tb_cpu;
 
     // 复位 + 仿真
     integer cycles = 0;
-    integer instrs_retired = 0;
+    integer instrs_retired = 0;     // 旧定义：wb_we && rd!=x0（与 dbg 对齐，保持向后兼容）
+    integer instrs_committed = 0;   // 新定义：每个 valid 走到 WB 的指令都算（含 store/branch/x0 写）
     integer br_total = 0;
     integer br_mispred = 0;
+
+    // CPI 拆解计数器
+    integer c_stall_lu     = 0;     // 因 load-use 触发的 ID 阶段 stall 拍数
+    integer c_flush_br     = 0;     // 条件分支预测错误次数
+    integer c_flush_jump   = 0;     // 无条件跳转引发的前端冲刷次数
+    integer c_flush_exc    = 0;     // 异常 / mret 冲刷次数
 
     // 直接窥探 DUT 内部 BPU 训练信号（仅仿真观察）
     wire dut_br_valid    = u_dut.bpu_upd_valid;
@@ -48,6 +59,21 @@ module tb_cpu;
     wire [31:0] dc_access = u_dut.u_dmem.stat_access;
     wire [31:0] dc_hit    = u_dut.u_dmem.stat_hit;
     wire [31:0] dc_miss   = u_dut.u_dmem.stat_miss;
+
+    // CPI 拆解所需的内部信号 peek
+    wire dut_stall          = u_dut.stall;
+    wire dut_ex_redirect    = u_dut.ex_redirect;
+    wire dut_ex_is_branch   = u_dut.ex_is_branch;
+    wire dut_ex_is_exc      = u_dut.ex_is_exception;
+    wire dut_ex_is_mret     = u_dut.ex_is_mret_inst;
+    wire dut_id_ex_is_jump  = u_dut.id_ex_is_jump;
+    wire dut_id_ex_valid    = u_dut.id_ex_valid;
+    wire dut_mem_wb_valid   = u_dut.mem_wb_valid;
+
+    // 在 EX 已被前端解析的有效条件分支：br_type!=NONE 且不是 JAL/JALR
+    wire dut_is_cond_branch = dut_ex_is_branch && !dut_id_ex_is_jump;
+    // 有效无条件跳转
+    wire dut_is_uncond_jump = dut_id_ex_valid && dut_id_ex_is_jump;
 
     initial begin
         $dumpfile("sim/cpu.vcd");
@@ -68,37 +94,42 @@ module tb_cpu;
                 $display("[%0t] cyc=%0d  WB  x%0d <= 0x%08h   (instr=0x%08h)",
                          $time, cycles, dbg_wb_rd, dbg_wb_data, dbg_instr_wb);
             end
+            if (dut_mem_wb_valid) begin
+                instrs_committed <= instrs_committed + 1;
+            end
             if (dut_br_valid) begin
                 br_total <= br_total + 1;
                 if (dut_mispredict) br_mispred <= br_mispred + 1;
             end
+
+            // CPI 拆解：load-use stall 计数（每被冻结一拍 +1）
+            if (dut_stall) c_stall_lu <= c_stall_lu + 1;
+
+            // 冲刷事件分类（互斥优先级：异常/mret > 无条件跳 > 条件分支错预测）
+            if (dut_ex_redirect) begin
+                if (dut_ex_is_exc || dut_ex_is_mret) c_flush_exc  <= c_flush_exc  + 1;
+                else if (dut_is_uncond_jump)         c_flush_jump <= c_flush_jump + 1;
+                else if (dut_is_cond_branch)         c_flush_br   <= c_flush_br   + 1;
+            end
         end
     end
 
-    // 简单结束条件：执行 200 个周期或 x31 = 0xCAFEBABE
-    initial begin
-        #2000;
-        $display("\n[TB] simulation finished by timeout");
-        $display("[TB] cycles=%0d  retired=%0d  CPI=%f",
-                 cycles, instrs_retired,
-                 (instrs_retired == 0) ? 0.0 : 1.0*cycles/instrs_retired);
-        $display("[TB] I$ access=%0d hit=%0d miss=%0d miss_rate=%f",
-                 ic_access, ic_hit, ic_miss,
-                 (ic_access == 0) ? 0.0 : 1.0*ic_miss/ic_access);
-        $display("[TB] D$ access=%0d hit=%0d miss=%0d miss_rate=%f",
-                 dc_access, dc_hit, dc_miss,
-                 (dc_access == 0) ? 0.0 : 1.0*dc_miss/dc_access);
-        $finish;
-    end
-
-    // 检测到向 x31 写 0xCAFEBABE 即提前结束
-    always @(posedge clk) begin
-        if (rst_n && dbg_wb_we && dbg_wb_rd == 5'd31 && dbg_wb_data == 32'hCAFEBABE) begin
-            #20;
-            $display("\n[TB] PASS: x31 = 0xCAFEBABE detected");
+    // 通用统计打印
+    task print_summary;
+        integer ri;
+        begin
+            // 32 寄存器终态 dump（用于运行器与独立 ISS 逐寄存器比对）
+            for (ri = 0; ri < 32; ri = ri + 1) begin
+                $display("[TB] REG x%02d=0x%08h", ri, u_dut.u_rf.regs[ri]);
+            end
             $display("[TB] cycles=%0d  retired=%0d  CPI=%f",
                      cycles, instrs_retired,
                      (instrs_retired == 0) ? 0.0 : 1.0*cycles/instrs_retired);
+            $display("[TB] committed=%0d  CPI_c=%f",
+                     instrs_committed,
+                     (instrs_committed == 0) ? 0.0 : 1.0*cycles/instrs_committed);
+            $display("[TB] stalls: load_use=%0d  flush_br=%0d  flush_jump=%0d  flush_exc=%0d",
+                     c_stall_lu, c_flush_br, c_flush_jump, c_flush_exc);
             $display("[TB] branches=%0d  mispredicts=%0d  miss_rate=%f",
                      br_total, br_mispred,
                      (br_total == 0) ? 0.0 : 1.0*br_mispred/br_total);
@@ -108,6 +139,23 @@ module tb_cpu;
             $display("[TB] D$ access=%0d hit=%0d miss=%0d miss_rate=%f",
                      dc_access, dc_hit, dc_miss,
                      (dc_access == 0) ? 0.0 : 1.0*dc_miss/dc_access);
+        end
+    endtask
+
+    // 简单结束条件：执行 200 个周期或 x31 = 0xCAFEBABE
+    initial begin
+        #(`SIM_TIMEOUT_NS);
+        $display("\n[TB] simulation finished by timeout");
+        print_summary;
+        $finish;
+    end
+
+    // 检测到向 x31 写 0xCAFEBABE 即提前结束
+    always @(posedge clk) begin
+        if (rst_n && dbg_wb_we && dbg_wb_rd == 5'd31 && dbg_wb_data == 32'hCAFEBABE) begin
+            #20;
+            $display("\n[TB] PASS: x31 = 0xCAFEBABE detected");
+            print_summary;
             $finish;
         end
     end

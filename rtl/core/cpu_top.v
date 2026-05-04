@@ -1,18 +1,21 @@
 // =============================================================
-// cpu_top.v — 5 级流水线 CPU 顶层（阶段 3：Forwarding + Load-use Stall）
+// cpu_top.v — 8 级流水线 CPU 顶层（在 7 级基础上拆 EX）
 //
 // 结构：
 //   IF  : PC + IMEM 取指
-//   ID  : 译码 + 读寄存器 + 立即数生成 + 冲突检测
-//   EX  : ALU 计算 + 前递 + 分支/跳转解析
+//   ID1 : 指令缓冲/对齐（IF 后一级）
+//   ID2 : 译码 + 读寄存器 + 立即数生成 + 冲突检测
+//   EX1 : ALU 计算 + 前递 + 分支/跳转解析
+//   EX2 : EX 结果缓冲（与 AGU 解耦）
+//   AGU : 地址生成/访存参数整理
 //   MEM : 数据存储器访问
 //   WB  : 写回寄存器堆
 //
 // 本阶段策略：
-//   - EX/MEM、MEM/WB 结果前递到 EX 的 ALU 与分支比较器
-//   - Load-use 冒险：在 ID 检测到后 stall 一个周期
-//     · 冻结 PC、冻结 IF/ID、ID/EX 注入气泡
-//   - 分支/跳转在 EX 解析，taken 时刷新 IF/ID 与 ID/EX
+//   - 结构改为 IF/ID1/ID2/EX1/EX2/AGU/MEM/WB
+//   - 前递源：EX/AGU、AGU/MEM（仅 ALU 结果）与 MEM/WB
+//   - Load-use 冒险：ID/EX1 基础检测 + MEM->EX 前递下的轻量化 stall
+//   - 分支/跳转仍在 EX 解析，taken/mret/exception 时刷新 IF/ID1 与 ID1/ID2
 // =============================================================
 `include "defines.v"
 
@@ -29,7 +32,7 @@ module cpu_top (
 );
 
     // ===== \u6240\u6709\u6d41\u6c34\u7ebf\u5bc4\u5b58\u5668\u524d\u7f6e\u58f0\u660e\uff08Icarus \u4e0d\u5141\u8bb8\u524d\u5411\u5f15\u7528 reg\uff09=====
-    // EX/MEM
+    // EX1/EX2
     reg [31:0] ex_mem_pc;
     reg [31:0] ex_mem_instr;
     reg [31:0] ex_mem_alu_y;
@@ -40,6 +43,30 @@ module cpu_top (
     reg        ex_mem_reg_write;
     reg [1:0]  ex_mem_wb_sel;
     reg        ex_mem_valid;
+
+    // EX2/AGU
+    reg [31:0] ex2_agu_pc;
+    reg [31:0] ex2_agu_instr;
+    reg [31:0] ex2_agu_alu_y;
+    reg [31:0] ex2_agu_rs2;
+    reg [4:0]  ex2_agu_rd;
+    reg        ex2_agu_mem_read, ex2_agu_mem_write;
+    reg [2:0]  ex2_agu_mem_funct3;
+    reg        ex2_agu_reg_write;
+    reg [1:0]  ex2_agu_wb_sel;
+    reg        ex2_agu_valid;
+
+    // AGU/MEM
+    reg [31:0] agu_mem_pc;
+    reg [31:0] agu_mem_instr;
+    reg [31:0] agu_mem_alu_y;
+    reg [31:0] agu_mem_rs2;
+    reg [4:0]  agu_mem_rd;
+    reg        agu_mem_mem_read, agu_mem_mem_write;
+    reg [2:0]  agu_mem_mem_funct3;
+    reg        agu_mem_reg_write;
+    reg [1:0]  agu_mem_wb_sel;
+    reg        agu_mem_valid;
     // MEM/WB
     reg [31:0] mem_wb_pc;
     reg [31:0] mem_wb_instr;
@@ -49,6 +76,9 @@ module cpu_top (
     reg        mem_wb_reg_write;
     reg [1:0]  mem_wb_wb_sel;
     reg        mem_wb_valid;
+
+    // MEM 阶段 load 扩展结果（用于 WB，也可用于 EX 前递）
+    reg [31:0] mem_load_data;
 
     // 最小 CSR 集合（阶段 5）
     reg [31:0] csr_mtvec;
@@ -104,7 +134,7 @@ module cpu_top (
         else                   pc <= pc_next_seq;
     end
 
-    // IF/ID 流水线寄存器
+    // IF/ID1 流水线寄存器
     reg [31:0] if_id_pc;
     reg [31:0] if_id_instr;
     reg        if_id_valid;
@@ -119,14 +149,14 @@ module cpu_top (
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
         end else if (ex_redirect) begin
-            // 刷新 IF/ID（注入气泡）
+            // 刷新 IF/ID1（注入气泡）
             if_id_pc          <= 32'b0;
             if_id_instr       <= 32'h00000013;
             if_id_valid       <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
         end else if (stall) begin
-            // 冻结 IF/ID：保持当前值
+            // 冻结 IF/ID1：保持当前值
             if_id_pc          <= if_id_pc;
             if_id_instr       <= if_id_instr;
             if_id_valid       <= if_id_valid;
@@ -141,11 +171,60 @@ module cpu_top (
         end
     end
 
-    // ---------------- ID ----------------
-    wire [31:0] id_instr = if_id_instr;
+    // ID1/ID2 流水线寄存器
+    reg [31:0] id1_id2_pc;
+    reg [31:0] id1_id2_instr;
+    reg        id1_id2_valid;
+    reg        id1_id2_pred_taken;
+    reg [31:0] id1_id2_pred_target;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            id1_id2_pc          <= 32'b0;
+            id1_id2_instr       <= 32'h00000013;
+            id1_id2_valid       <= 1'b0;
+            id1_id2_pred_taken  <= 1'b0;
+            id1_id2_pred_target <= 32'b0;
+        end else if (ex_redirect) begin
+            // 刷新 ID2
+            id1_id2_pc          <= 32'b0;
+            id1_id2_instr       <= 32'h00000013;
+            id1_id2_valid       <= 1'b0;
+            id1_id2_pred_taken  <= 1'b0;
+            id1_id2_pred_target <= 32'b0;
+        end else if (stall) begin
+            // 冻结 ID2
+            id1_id2_pc          <= id1_id2_pc;
+            id1_id2_instr       <= id1_id2_instr;
+            id1_id2_valid       <= id1_id2_valid;
+            id1_id2_pred_taken  <= id1_id2_pred_taken;
+            id1_id2_pred_target <= id1_id2_pred_target;
+        end else begin
+            id1_id2_pc          <= if_id_pc;
+            id1_id2_instr       <= if_id_instr;
+            id1_id2_valid       <= if_id_valid;
+            id1_id2_pred_taken  <= if_id_pred_taken;
+            id1_id2_pred_target <= if_id_pred_target;
+        end
+    end
+
+    // ---------------- ID2 ----------------
+    wire [31:0] id_instr = id1_id2_instr;
+    wire [6:0]  id_opcode= id_instr[6:0];
     wire [4:0]  id_rs1   = id_instr[19:15];
     wire [4:0]  id_rs2   = id_instr[24:20];
     wire [4:0]  id_rd    = id_instr[11:7];
+
+    // 仅在指令真实读取源寄存器时参与 load-use 相关判断，减少无效 stall。
+    wire id_use_rs1 = (id_opcode == `OP_REG)    ||
+                      (id_opcode == `OP_IMM)    ||
+                      (id_opcode == `OP_LOAD)   ||
+                      (id_opcode == `OP_STORE)  ||
+                      (id_opcode == `OP_BRANCH) ||
+                      (id_opcode == `OP_JALR);
+    wire id_use_rs2 = (id_opcode == `OP_REG)    ||
+                      (id_opcode == `OP_STORE)  ||
+                      (id_opcode == `OP_BRANCH);
 
     // 控制信号
     wire [2:0] id_imm_type;
@@ -225,8 +304,13 @@ module cpu_top (
     hazard u_hazard (
         .id_ex_mem_read (id_ex_mem_read),
         .id_ex_rd       (id_ex_rd),
+        // 8 级恢复保守窗口：避免 load 在更深级时被过早消费
+        .ex_agu_mem_read(ex_mem_mem_read),
+        .ex_agu_rd      (ex_mem_rd),
         .id_rs1         (id_rs1),
         .id_rs2         (id_rs2),
+        .id_use_rs1     (id_use_rs1),
+        .id_use_rs2     (id_use_rs2),
         .stall          (stall)
     );
 
@@ -272,7 +356,7 @@ module cpu_top (
             id_ex_pred_taken  <= 1'b0;
             id_ex_pred_target <= 32'b0;
         end else begin
-            id_ex_pc          <= if_id_pc;
+            id_ex_pc          <= id1_id2_pc;
             id_ex_instr       <= id_instr;
             id_ex_rs1         <= id_rs1_data;
             id_ex_rs2         <= id_rs2_data;
@@ -290,37 +374,52 @@ module cpu_top (
             id_ex_mem_funct3  <= id_mem_funct3;
             id_ex_reg_write   <= id_reg_write;
             id_ex_wb_sel      <= id_wb_sel;
-            id_ex_valid       <= if_id_valid;
+            id_ex_valid       <= id1_id2_valid;
             id_ex_is_ecall    <= id_is_ecall;
             id_ex_is_mret     <= id_is_mret;
             id_ex_is_illegal  <= id_is_illegal;
-            id_ex_pred_taken  <= if_id_pred_taken;
-            id_ex_pred_target <= if_id_pred_target;
+            id_ex_pred_taken  <= id1_id2_pred_taken;
+            id_ex_pred_target <= id1_id2_pred_target;
         end
     end
 
-    // ---------------- EX ----------------
+    // ---------------- EX1 ----------------
     // 前递选择
     wire [1:0] fwd_a, fwd_b;
     forwarding u_fwd (
         .id_ex_rs1        (id_ex_rs1_addr),
         .id_ex_rs2        (id_ex_rs2_addr),
-        .ex_mem_reg_write (ex_mem_reg_write & ex_mem_valid),
+        .ex_mem_reg_write (ex_mem_reg_write & ex_mem_valid & ~ex_mem_mem_read),
         .ex_mem_rd        (ex_mem_rd),
+        .ex2_agu_reg_write(ex2_agu_reg_write & ex2_agu_valid & ~ex2_agu_mem_read),
+        .ex2_agu_rd       (ex2_agu_rd),
+        .agu_mem_reg_write(agu_mem_reg_write & agu_mem_valid),
+        .agu_mem_rd       (agu_mem_rd),
         .mem_wb_reg_write (mem_wb_reg_write & mem_wb_valid),
         .mem_wb_rd        (mem_wb_rd),
         .fwd_a            (fwd_a),
         .fwd_b            (fwd_b)
     );
 
+    // AGU/MEM 前递数据：普通 ALU 指令前递地址/ALU结果，load 前递扩展后的读数据
+    wire [31:0] agu_mem_fwd_data = agu_mem_mem_read ? mem_load_data : agu_mem_alu_y;
+    wire        fwd_a_from_agu = (agu_mem_reg_write & agu_mem_valid) &&
+                                 (agu_mem_rd != 5'd0) &&
+                                 (agu_mem_rd == id_ex_rs1_addr);
+    wire        fwd_b_from_agu = (agu_mem_reg_write & agu_mem_valid) &&
+                                 (agu_mem_rd != 5'd0) &&
+                                 (agu_mem_rd == id_ex_rs2_addr);
+
     // 前递后的 rs1/rs2（这是“逐表达式中的真实寄存器值”）
     wire [31:0] ex_rs1_fwd =
         (fwd_a == 2'b01) ? ex_mem_alu_y :
-        (fwd_a == 2'b10) ? wb_data      :
+        (fwd_a == 2'b10) ? ex2_agu_alu_y :
+        (fwd_a == 2'b11) ? (fwd_a_from_agu ? agu_mem_fwd_data : wb_data) :
                            id_ex_rs1;
     wire [31:0] ex_rs2_fwd =
         (fwd_b == 2'b01) ? ex_mem_alu_y :
-        (fwd_b == 2'b10) ? wb_data      :
+        (fwd_b == 2'b10) ? ex2_agu_alu_y :
+        (fwd_b == 2'b11) ? (fwd_b_from_agu ? agu_mem_fwd_data : wb_data) :
                            id_ex_rs2;
 
     wire [31:0] ex_a = (id_ex_a_src == `ASRC_PC ) ? id_ex_pc  : ex_rs1_fwd;
@@ -387,7 +486,7 @@ module cpu_top (
         end
     end
 
-    // EX/MEM 流水线寄存器（声明在顶部）
+    // EX1/EX2 流水线寄存器（声明在顶部）
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             ex_mem_pc         <= 32'b0;
@@ -417,33 +516,91 @@ module cpu_top (
         end
     end
 
+    // EX2/AGU 流水线寄存器（声明在顶部）
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ex2_agu_pc         <= 32'b0;
+            ex2_agu_instr      <= 32'h00000013;
+            ex2_agu_alu_y      <= 32'b0;
+            ex2_agu_rs2        <= 32'b0;
+            ex2_agu_rd         <= 5'b0;
+            ex2_agu_mem_read   <= 1'b0;
+            ex2_agu_mem_write  <= 1'b0;
+            ex2_agu_mem_funct3 <= 3'b0;
+            ex2_agu_reg_write  <= 1'b0;
+            ex2_agu_wb_sel     <= `WB_ALU;
+            ex2_agu_valid      <= 1'b0;
+        end else begin
+            ex2_agu_pc         <= ex_mem_pc;
+            ex2_agu_instr      <= ex_mem_instr;
+            ex2_agu_alu_y      <= ex_mem_alu_y;
+            ex2_agu_rs2        <= ex_mem_rs2;
+            ex2_agu_rd         <= ex_mem_rd;
+            ex2_agu_mem_read   <= ex_mem_mem_read;
+            ex2_agu_mem_write  <= ex_mem_mem_write;
+            ex2_agu_mem_funct3 <= ex_mem_mem_funct3;
+            ex2_agu_reg_write  <= ex_mem_reg_write;
+            ex2_agu_wb_sel     <= ex_mem_wb_sel;
+            ex2_agu_valid      <= ex_mem_valid;
+        end
+    end
+
+    // ---------------- AGU ----------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            agu_mem_pc         <= 32'b0;
+            agu_mem_instr      <= 32'h00000013;
+            agu_mem_alu_y      <= 32'b0;
+            agu_mem_rs2        <= 32'b0;
+            agu_mem_rd         <= 5'b0;
+            agu_mem_mem_read   <= 1'b0;
+            agu_mem_mem_write  <= 1'b0;
+            agu_mem_mem_funct3 <= 3'b0;
+            agu_mem_reg_write  <= 1'b0;
+            agu_mem_wb_sel     <= `WB_ALU;
+            agu_mem_valid      <= 1'b0;
+        end else begin
+            agu_mem_pc         <= ex2_agu_pc;
+            agu_mem_instr      <= ex2_agu_instr;
+            agu_mem_alu_y      <= ex2_agu_alu_y;
+            agu_mem_rs2        <= ex2_agu_rs2;
+            agu_mem_rd         <= ex2_agu_rd;
+            agu_mem_mem_read   <= ex2_agu_mem_read;
+            agu_mem_mem_write  <= ex2_agu_mem_write;
+            agu_mem_mem_funct3 <= ex2_agu_mem_funct3;
+            agu_mem_reg_write  <= ex2_agu_reg_write;
+            agu_mem_wb_sel     <= ex2_agu_wb_sel;
+            agu_mem_valid      <= ex2_agu_valid;
+        end
+    end
+
     // ---------------- MEM ----------------
     // 字节使能 + 写数据按对齐放置
     reg  [3:0]  mem_be;
     reg  [31:0] mem_wdata_aligned;
-    wire [1:0]  mem_byte_off = ex_mem_alu_y[1:0];
+    wire [1:0]  mem_byte_off = agu_mem_alu_y[1:0];
 
     always @(*) begin
         mem_be            = 4'b0000;
         mem_wdata_aligned = 32'b0;
-        case (ex_mem_mem_funct3)
+        case (agu_mem_mem_funct3)
             3'b000: begin // SB
                 case (mem_byte_off)
-                    2'd0: begin mem_be = 4'b0001; mem_wdata_aligned = {24'b0, ex_mem_rs2[7:0]}; end
-                    2'd1: begin mem_be = 4'b0010; mem_wdata_aligned = {16'b0, ex_mem_rs2[7:0], 8'b0}; end
-                    2'd2: begin mem_be = 4'b0100; mem_wdata_aligned = {8'b0, ex_mem_rs2[7:0], 16'b0}; end
-                    2'd3: begin mem_be = 4'b1000; mem_wdata_aligned = {ex_mem_rs2[7:0], 24'b0}; end
+                    2'd0: begin mem_be = 4'b0001; mem_wdata_aligned = {24'b0, agu_mem_rs2[7:0]}; end
+                    2'd1: begin mem_be = 4'b0010; mem_wdata_aligned = {16'b0, agu_mem_rs2[7:0], 8'b0}; end
+                    2'd2: begin mem_be = 4'b0100; mem_wdata_aligned = {8'b0, agu_mem_rs2[7:0], 16'b0}; end
+                    2'd3: begin mem_be = 4'b1000; mem_wdata_aligned = {agu_mem_rs2[7:0], 24'b0}; end
                 endcase
             end
             3'b001: begin // SH
                 if (mem_byte_off == 2'd0) begin
-                    mem_be = 4'b0011; mem_wdata_aligned = {16'b0, ex_mem_rs2[15:0]};
+                    mem_be = 4'b0011; mem_wdata_aligned = {16'b0, agu_mem_rs2[15:0]};
                 end else begin
-                    mem_be = 4'b1100; mem_wdata_aligned = {ex_mem_rs2[15:0], 16'b0};
+                    mem_be = 4'b1100; mem_wdata_aligned = {agu_mem_rs2[15:0], 16'b0};
                 end
             end
             3'b010: begin // SW
-                mem_be = 4'b1111; mem_wdata_aligned = ex_mem_rs2;
+                mem_be = 4'b1111; mem_wdata_aligned = agu_mem_rs2;
             end
             default: ;
         endcase
@@ -452,17 +609,16 @@ module cpu_top (
     wire [31:0] dmem_rdata;
     dmem u_dmem (
         .clk   (clk),
-        .addr  (ex_mem_alu_y),
-        .we    (ex_mem_mem_write & ex_mem_valid),
+        .addr  (agu_mem_alu_y),
+        .we    (agu_mem_mem_write & agu_mem_valid),
         .be    (mem_be),
         .wdata (mem_wdata_aligned),
         .rdata (dmem_rdata)
     );
 
     // load 数据按宽度/符号扩展
-    reg [31:0] mem_load_data;
     always @(*) begin
-        case (ex_mem_mem_funct3)
+        case (agu_mem_mem_funct3)
             3'b000: begin // LB
                 case (mem_byte_off)
                     2'd0: mem_load_data = {{24{dmem_rdata[7]}},  dmem_rdata[7:0]};
@@ -508,14 +664,14 @@ module cpu_top (
             mem_wb_wb_sel    <= `WB_ALU;
             mem_wb_valid     <= 1'b0;
         end else begin
-            mem_wb_pc        <= ex_mem_pc;
-            mem_wb_instr     <= ex_mem_instr;
-            mem_wb_alu_y     <= ex_mem_alu_y;
+            mem_wb_pc        <= agu_mem_pc;
+            mem_wb_instr     <= agu_mem_instr;
+            mem_wb_alu_y     <= agu_mem_alu_y;
             mem_wb_load      <= mem_load_data;
-            mem_wb_rd        <= ex_mem_rd;
-            mem_wb_reg_write <= ex_mem_reg_write;
-            mem_wb_wb_sel    <= ex_mem_wb_sel;
-            mem_wb_valid     <= ex_mem_valid;
+            mem_wb_rd        <= agu_mem_rd;
+            mem_wb_reg_write <= agu_mem_reg_write;
+            mem_wb_wb_sel    <= agu_mem_wb_sel;
+            mem_wb_valid     <= agu_mem_valid;
         end
     end
 

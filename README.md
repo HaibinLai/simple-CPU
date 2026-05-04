@@ -2,14 +2,14 @@
 
 ## From 5-Stage Pipelined RISC-V (RV32I) CPU to 10 stage
 
-A classic 5-stage pipelined CPU built in Verilog, developed in incremental stages for teaching/learning purposes.
+A staged pipelined CPU built in Verilog, developed incrementally for teaching/learning purposes.
 
 ## Target ISA
 RV32I integer subset (47 core instructions). Future extensions: Zicsr / interrupts.
 
-## Pipeline
+## Current Implemented Pipeline
 ```
-IF  →  ID  →  EX  →  MEM  →  WB
+IF  →  ID1  →  ID2  →  EX1  →  EX2  →  AGU  →  MEM  →  WB
 ```
 
 ## Current Status
@@ -210,6 +210,119 @@ python3 tools/gen_rv32_tests.py --count 300 --seed 12345
 # Control random body length (default 20~40 instructions + epilogue)
 python3 tools/gen_rv32_tests.py --min-body 10 --max-body 60
 ```
+
+## Performance Benchmarks (CPI / branch / cache)
+
+For longer kernels — Fibonacci, sum, memcpy, popcount, matrix multiply,
+bubble sort, CRC32, binary search, dot product — use:
+- `tools/asm.py`            — tiny label-based RV32I assembler.
+- `tools/gen_benchmarks.py` — emit hand-written `.hex` kernels.
+- `tools/run_benchmarks.py` — run each, parse the testbench summary,
+  print a CPI / branch / cache table.
+
+The simulation timeout is configurable via `TIMEOUT_NS` (Makefile variable),
+because heavier kernels exceed the default 2000 ns.
+
+### 1) Generate + run all benchmarks
+```bash
+python3 tools/run_benchmarks.py --regen --timeout-ns 8000000
+```
+
+Example output:
+```
+benchmark             status      cycles     retired       CPI   committed     CPI_c      lu    f_br   f_jmp   f_exc   branches   mispred   br_miss   I$_miss   D$_miss
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+bsearch_64              PASS         939         498     1.886         846     1.110      36      13       5       0        278        18     0.065     0.061     0.377
+bsort_16                PASS        1729         841     2.056        1540     1.123     120      18       4       0        443        22     0.050     0.021     0.323
+crc32_64b               PASS        5161        2337     2.208        4116     1.254      64     322       4       0       1763       326     0.185     0.009     0.055
+dotprod_32              PASS        8649        4705     1.838        8037     1.076       0     134      69       0       3300       203     0.062     0.006     0.372
+fib_20                  PASS         141          87     1.621         129     1.093       0       1       2       0         42         3     0.071     0.125     0.215
+matmul_4x4              PASS       17340        9929     1.746       16506     1.051       0     252      25       0       6593       277     0.042     0.005     0.363
+memcpy_64w              PASS         532         262     2.031         456     1.167      64       1       2       0        130         3     0.023     0.034     0.596
+popcount_64             PASS        1500         713     2.104        1293     1.160       0      65       3       0        580        68     0.117     0.013     0.051
+sum_1_to_100            PASS         420         206     2.039         408     1.029       0       1       2       0        202         3     0.015     0.035     0.541
+```
+
+### 2) Reading the table
+
+Two CPI numbers are reported because they answer different questions:
+
+- `CPI` (legacy): `cycles / retired`, where `retired` only counts
+  instructions that performed a register write to a non-x0 destination.
+  Stores, branches, `JAL x0,...`, etc. are excluded, which makes this
+  metric **systematically pessimistic** for memory- and control-heavy code.
+- `CPI_c` (commit-based): `cycles / committed`, where `committed` counts
+  every instruction that reaches WB with `mem_wb_valid` (matches the
+  commonly understood "instructions executed"). Use this number when
+  comparing the design against the ideal in-order issue rate of `1.0`.
+
+The new stall-breakdown columns are absolute event counts:
+
+- `lu`     — number of cycles the front-end was frozen by load-use stalls.
+- `f_br`   — conditional-branch mispredict flushes.
+- `f_jmp`  — flushes caused by unconditional jumps (`JAL` / `JALR`)
+  resolved late.
+- `f_exc`  — flushes caused by exceptions / `mret`.
+
+Together these explain where each kernel's CPI overhead comes from.
+
+### 3) Observations from the current measurements
+
+- `matmul_4x4`, `dotprod_32`, `sum_1_to_100`: legacy `CPI` ~1.7–2.0 looks
+  high, but **commit-based `CPI_c` is 1.03–1.08** — already very close to
+  the single-issue ideal. The gap is almost entirely an artifact of
+  stores not being counted in `retired`.
+- `crc32_64b`: this is the kernel that is **actually CPI-bound** —
+  `CPI_c = 1.254` driven by 322 conditional-branch mispredicts in the
+  bit-level inner loop. The BHT cannot learn the pattern.
+- `memcpy_64w`, `bsort_16`: dominated by load-use stalls (`lu = 64` /
+  `120`) — adjacent `LW`/`SW` chains keep producing 1-cycle bubbles.
+- `bsearch_64`: a balanced mix — `lu = 36` (data-dependent address
+  computations) plus `f_br = 13` (the inherently unpredictable comparison
+  branch in binary search).
+
+### 4) Available kernels
+
+| name             | what it does                                        | what it stresses                                      |
+| ---------------- | --------------------------------------------------- | ----------------------------------------------------- |
+| `fib_20`         | iterative Fibonacci(20)                             | short RAW chain, EX→EX forwarding                     |
+| `sum_1_to_100`   | sum 1..100                                          | medium loop with predictable backward branch          |
+| `memcpy_64w`     | copy 64 words 0x1000 → 0x2000                       | LW/SW pairs, D-Cache traffic                          |
+| `popcount_64`    | Brian Kernighan popcount over 1..64                 | nested loop, data-dependent inner termination         |
+| `matmul_4x4`     | int 4×4 matmul with software multiply               | triple loop + strided LW/SW + long mul shift+add chain|
+| `bsort_16`       | bubble-sort 16 ints                                 | adjacent LW/SW + many short data-dependent branches   |
+| `crc32_64b`      | CRC32 (poly 0xEDB88320) over 64 bytes               | bit-level inner loop, hard-to-predict branches        |
+| `bsearch_64`     | binary search 6 keys against sorted array of 64     | data-dependent branches that defeat the BHT           |
+| `dotprod_32`     | dot product of length-32 vectors via software mul   | long inner loop with function call (JAL/JALR)         |
+
+List them:
+```bash
+python3 tools/gen_benchmarks.py --list
+```
+
+### 5) Run a single kernel
+```bash
+make run PROG=tb/programs/bench/matmul_4x4.hex TIMEOUT_NS=8000000
+```
+
+### 6) Useful options
+```bash
+# Filter by name (glob on stem)
+python3 tools/run_benchmarks.py --filter "matmul_*"
+python3 tools/run_benchmarks.py --filter "*sort*"
+
+# Just regenerate the .hex files
+python3 tools/gen_benchmarks.py --out-dir tb/programs/bench
+```
+
+### 7) Adding a new benchmark
+Edit `tools/gen_benchmarks.py`:
+1. Build the kernel using the `Asm` helper from `tools/asm.py`. Use
+   `a.label("foo")` and `a.beq(rs1, rs2, "foo")` / `a.j("foo")` so you don't
+   have to compute branch offsets by hand.
+2. End with `append_epilogue(a)` so the testbench's PASS detector triggers.
+3. Add the builder to the `BENCHMARKS` dict.
+4. Re-run `python3 tools/run_benchmarks.py --regen`.
 
 ## Conventions
 - Rising-edge clocking, synchronous active-low reset `rst_n`.
