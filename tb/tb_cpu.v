@@ -89,14 +89,21 @@ module tb_cpu;
     always @(posedge clk) begin
         if (rst_n) begin
             cycles <= cycles + 1;
+            // R2: 同 cycle 可能有 slot0 WB + slot1 EX1 写回，合并计数
+            instrs_retired <= instrs_retired
+                + ((dbg_wb_we && dbg_wb_rd != 5'd0) ? 1 : 0)
+                + ((u_dut.slot1_wb_we && u_dut.slot1_wb_rd != 5'd0) ? 1 : 0);
             if (dbg_wb_we && dbg_wb_rd != 5'd0) begin
-                instrs_retired <= instrs_retired + 1;
                 $display("[%0t] cyc=%0d  WB  x%0d <= 0x%08h   (instr=0x%08h)",
                          $time, cycles, dbg_wb_rd, dbg_wb_data, dbg_instr_wb);
             end
-            if (dut_mem_wb_valid) begin
-                instrs_committed <= instrs_committed + 1;
+            if (u_dut.slot1_wb_we && u_dut.slot1_wb_rd != 5'd0) begin
+                $display("[%0t] cyc=%0d  S1  x%0d <= 0x%08h   (slot1 EX1)",
+                         $time, cycles, u_dut.slot1_wb_rd, u_dut.slot1_wb_data);
             end
+            instrs_committed <= instrs_committed
+                + (dut_mem_wb_valid ? 1 : 0)
+                + (u_dut.slot1_wb_we ? 1 : 0);
             if (dut_br_valid) begin
                 br_total <= br_total + 1;
                 if (dut_mispredict) br_mispred <= br_mispred + 1;

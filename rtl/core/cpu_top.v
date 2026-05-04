@@ -89,13 +89,19 @@ module cpu_top (
     // ---------------- IF ----------------
     reg  [31:0] pc;
     wire [31:0] pc_plus4 = pc + 32'd4;
+    wire [31:0] pc_plus8 = pc + 32'd8;
 
     // 来自 EX 的重定向
     wire        ex_redirect;
     wire [31:0] ex_redirect_pc;
 
-    // 来自 ID 的 stall
+    // 来自 ID 的 stall（load-use）
     wire        stall;
+    // IFQ backpressure stall（IFQ 即将满，无法接收 2 条新指令）
+    wire        ifq_almost_full;
+    wire        ifq_full;
+    // 综合冻结条件：load-use stall 或 IFQ 反压
+    wire        if_freeze = stall || ifq_almost_full;
 
     wire [31:0] imem_rdata0, imem_rdata1;
 
@@ -127,13 +133,14 @@ module cpu_top (
         .upd_target  (bpu_upd_target)
     );
 
-    // PC 选择：刷新 > stall > 预测 > PC+4
-    wire [31:0] pc_next_seq = bpu_pred_taken ? bpu_pred_target : pc_plus4;
+    // PC 选择：刷新 > stall/反压 > 预测 > PC+8（双发射前端）
+    // BPU 仅在 slot0 处预测；若预测 taken，则 slot1 被丢弃，PC 跳转到目标
+    wire [31:0] pc_next_seq = bpu_pred_taken ? bpu_pred_target : pc_plus8;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)            pc <= `RESET_PC;
         else if (ex_redirect)  pc <= ex_redirect_pc;
-        else if (stall)        pc <= pc;          // 冻结 PC
+        else if (if_freeze)    pc <= pc;          // 冻结 PC
         else                   pc <= pc_next_seq;
     end
 
@@ -167,8 +174,8 @@ module cpu_top (
             if_id_valid1      <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
-        end else if (stall) begin
-            // 冻结 IF/ID1：保持当前值
+        end else if (if_freeze) begin
+            // 冻结 IF/ID1：保持当前值（load-use stall 或 IFQ 反压）
             if_id_pc0         <= if_id_pc0;
             if_id_instr0      <= if_id_instr0;
             if_id_valid0      <= if_id_valid0;
@@ -183,64 +190,71 @@ module cpu_top (
             if_id_valid0      <= 1'b1;
             if_id_pc1         <= pc_plus4;
             if_id_instr1      <= imem_rdata1;
-            // slot1 is currently carried as bundle lookahead; backend remains single-issue on slot0.
+            // slot1 失效条件：BPU 在 slot0 预测 taken（slot1 在分支后，应被丢弃）
             if_id_valid1      <= ~bpu_pred_taken;
             if_id_pred_taken  <= bpu_pred_taken;
             if_id_pred_target <= bpu_pred_target;
         end
     end
 
-    // ID1/ID2 流水线寄存器
-    reg [31:0] id1_id2_pc0;
-    reg [31:0] id1_id2_instr0;
-    reg        id1_id2_valid0;
-    reg [31:0] id1_id2_pc1;
-    reg [31:0] id1_id2_instr1;
-    reg        id1_id2_valid1;
-    reg        id1_id2_pred_taken;
-    reg [31:0] id1_id2_pred_target;
+    // ---------------- IFQ (Issue Fetch Queue) ----------------
+    // 替代原 ID1/ID2 流水线寄存器；解耦取指带宽与发射带宽
+    // R1: 单发射 pop（pop=1，pop2=0）
+    // R2 (future): 双发射 pop（启用 pop2）
+    wire        id1_id2_valid0;
+    wire [31:0] id1_id2_pc0;
+    wire [31:0] id1_id2_instr0;
+    wire        id1_id2_pred_taken;
+    wire [31:0] id1_id2_pred_target;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            id1_id2_pc0         <= 32'b0;
-            id1_id2_instr0      <= 32'h00000013;
-            id1_id2_valid0      <= 1'b0;
-            id1_id2_pc1         <= 32'b0;
-            id1_id2_instr1      <= 32'h00000013;
-            id1_id2_valid1      <= 1'b0;
-            id1_id2_pred_taken  <= 1'b0;
-            id1_id2_pred_target <= 32'b0;
-        end else if (ex_redirect) begin
-            // 刷新 ID2
-            id1_id2_pc0         <= 32'b0;
-            id1_id2_instr0      <= 32'h00000013;
-            id1_id2_valid0      <= 1'b0;
-            id1_id2_pc1         <= 32'b0;
-            id1_id2_instr1      <= 32'h00000013;
-            id1_id2_valid1      <= 1'b0;
-            id1_id2_pred_taken  <= 1'b0;
-            id1_id2_pred_target <= 32'b0;
-        end else if (stall) begin
-            // 冻结 ID2
-            id1_id2_pc0         <= id1_id2_pc0;
-            id1_id2_instr0      <= id1_id2_instr0;
-            id1_id2_valid0      <= id1_id2_valid0;
-            id1_id2_pc1         <= id1_id2_pc1;
-            id1_id2_instr1      <= id1_id2_instr1;
-            id1_id2_valid1      <= id1_id2_valid1;
-            id1_id2_pred_taken  <= id1_id2_pred_taken;
-            id1_id2_pred_target <= id1_id2_pred_target;
-        end else begin
-            id1_id2_pc0         <= if_id_pc0;
-            id1_id2_instr0      <= if_id_instr0;
-            id1_id2_valid0      <= if_id_valid0;
-            id1_id2_pc1         <= if_id_pc1;
-            id1_id2_instr1      <= if_id_instr1;
-            id1_id2_valid1      <= if_id_valid1;
-            id1_id2_pred_taken  <= if_id_pred_taken;
-            id1_id2_pred_target <= if_id_pred_target;
-        end
-    end
+    wire        id1_id2_valid1;
+    wire [31:0] id1_id2_pc1;
+    wire [31:0] id1_id2_instr1;
+    // slot1 prediction signals are not used by ID2 (slot1 cannot be a branch in M1.5 rules)
+    wire        id1_id2_pred_taken1_unused;
+    wire [31:0] id1_id2_pred_target1_unused;
+
+    // pop 控制：当 backend 接受 slot0 时（无 stall、无 redirect、有效），消费一条
+    wire ifq_pop_slot0  = id1_id2_valid0 && !stall && !ex_redirect;
+    // R2: 双发射 — 仅当 slot0 pop 且 slot1 满足配对条件时才 pop slot1
+    wire id2_issue_slot1;
+    wire ifq_pop_slot1  = ifq_pop_slot0 && id2_issue_slot1;
+
+    wire [2:0]  ifq_count;
+
+    ifq #(.DEPTH(4), .AW(2)) u_ifq (
+        .clk    (clk),
+        .rst_n  (rst_n),
+        .flush  (ex_redirect),
+        // Push side: 来自 IF/ID1
+        .push_valid_0       (if_id_valid0 && !if_freeze),
+        .push_pc_0          (if_id_pc0),
+        .push_instr_0       (if_id_instr0),
+        .push_pred_taken_0  (if_id_pred_taken),
+        .push_pred_target_0 (if_id_pred_target),
+        .push_valid_1       (if_id_valid1 && !if_freeze),
+        .push_pc_1          (if_id_pc1),
+        .push_instr_1       (if_id_instr1),
+        .push_pred_taken_1  (1'b0),    // slot1 不携带预测（仅 slot0 可能是分支）
+        .push_pred_target_1 (32'b0),
+        .full               (ifq_full),
+        .almost_full        (ifq_almost_full),
+        // Pop side -> ID2 decode
+        .pop                (ifq_pop_slot0),
+        .head_valid         (id1_id2_valid0),
+        .head_pc            (id1_id2_pc0),
+        .head_instr         (id1_id2_instr0),
+        .head_pred_taken    (id1_id2_pred_taken),
+        .head_pred_target   (id1_id2_pred_target),
+        // 第二头（R2 双发射用）
+        .head2_valid        (id1_id2_valid1),
+        .head2_pc           (id1_id2_pc1),
+        .head2_instr        (id1_id2_instr1),
+        .head2_pred_taken   (id1_id2_pred_taken1_unused),
+        .head2_pred_target  (id1_id2_pred_target1_unused),
+        .pop2               (ifq_pop_slot1),
+        .count              (ifq_count)
+    );
 
     // ---------------- ID2 ----------------
     // Milestone 1 keeps the backend single-issue; slot0 remains the only consumer.
@@ -339,7 +353,7 @@ module cpu_top (
         .is_illegal (id1_is_illegal)
     );
 
-    // Slot1 配对约束：
+    // Slot1 配对约束（仅依赖 ID 阶段信号；in-flight load 检查在 id_ex 声明后做）：
     // 1. Slot1 有效 && 是 ALU-only 指令
     // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
     wire id1_no_raw_hazard = ~(
@@ -349,8 +363,33 @@ module cpu_top (
         )
     );
 
-    // Slot1 issue 条件（仅在后续 Milestone 2 中才会真正 issue；当前用于验证）
-    wire id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only && id1_no_raw_hazard;
+    // R2 BUG#1 修复：避免 output dependency（WAW）。
+    // 若 slot0.rd == slot1.rd，slot0 在 5 周期后 WB 会覆盖 slot1 早写回的正确值。
+    wire id1_no_waw_hazard = ~(
+        (id_reg_write && id1_reg_write) &&
+        (id_rd == id1_rd) && (id_rd != 5'd0)
+    );
+
+    wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
+    wire slot1_rs2_used = (id1_opcode == `OP_REG);
+
+    // R2 BUG#2: in-flight load → slot1 RAW（在 id_ex 声明之后定义）
+    wire id1_no_load_use_hazard;
+    // R2 BUG#5: cross-cycle WAW（在 id_ex/ex_mem/... 声明之后定义）
+    wire id1_no_xcycle_waw;
+
+    // R2 BUG#4 修复：slot0 必须是"无副作用 / 无重定向" 的指令，才允许 slot1 配对。
+    // 否则 slot0 mispredict/exception 时 slot1 已经写回 regfile，无法撤销。
+    // 安全集合：slot0 必须不是 branch/jump/ecall/mret/illegal，且不是 store（避免乱序内存）。
+    wire id_slot0_safe_for_pair = (id_br_type == `BR_NONE) && !id_is_jump &&
+                                   !id_is_ecall && !id_is_mret && !id_is_illegal &&
+                                   !id_mem_write;
+
+    // Slot1 issue 条件
+    assign id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only &&
+                             id_slot0_safe_for_pair &&
+                             id1_no_raw_hazard && id1_no_waw_hazard &&
+                             id1_no_load_use_hazard && id1_no_xcycle_waw;
     wire id2_issue_slot0 = id1_id2_valid0;
 
     // 寄存器堆（写口接到 WB）
@@ -436,6 +475,40 @@ module cpu_top (
         .id_use_rs1     (id_use_rs1),
         .id_use_rs2     (id_use_rs2),
         .stall          (stall)
+    );
+
+    // R2 BUG#2 修复：slot1 不能依赖 in-flight load（slot1 没有 load forwarding 路径）。
+    // 检查 slot1.rs1/rs2 vs 任意 in-flight load 的 rd
+    assign id1_no_load_use_hazard = ~(
+        (id_ex_mem_read && id_ex_valid && (id_ex_rd != 5'd0) && (
+            (slot1_rs1_used && (id1_rs1 == id_ex_rd)) ||
+            (slot1_rs2_used && (id1_rs2 == id_ex_rd))
+        )) ||
+        (ex_mem_mem_read && ex_mem_valid && (ex_mem_rd != 5'd0) && (
+            (slot1_rs1_used && (id1_rs1 == ex_mem_rd)) ||
+            (slot1_rs2_used && (id1_rs2 == ex_mem_rd))
+        )) ||
+        (ex2_agu_mem_read && ex2_agu_valid && (ex2_agu_rd != 5'd0) && (
+            (slot1_rs1_used && (id1_rs1 == ex2_agu_rd)) ||
+            (slot1_rs2_used && (id1_rs2 == ex2_agu_rd))
+        )) ||
+        (agu_mem_mem_read && agu_mem_valid && (agu_mem_rd != 5'd0) && (
+            (slot1_rs1_used && (id1_rs1 == agu_mem_rd)) ||
+            (slot1_rs2_used && (id1_rs2 == agu_mem_rd))
+        ))
+    );
+
+    // R2 BUG#5 修复：cross-cycle WAW。slot1 在 EX1 立即写回，但 in-flight slot0
+    // 之前发射的指令仍在 5 级流水线中，将在 N 周期后 WB。若 slot1.rd 与
+    // 任意 in-flight slot0 的 rd 相同，slot0 的晚到 WB 会覆盖 slot1 的正确值。
+    assign id1_no_xcycle_waw = ~(
+        id1_reg_write && (id1_rd != 5'd0) && (
+            (id_ex_valid    && id_ex_reg_write    && (id_ex_rd    == id1_rd)) ||
+            (ex_mem_valid   && ex_mem_reg_write   && (ex_mem_rd   == id1_rd)) ||
+            (ex2_agu_valid  && ex2_agu_reg_write  && (ex2_agu_rd  == id1_rd)) ||
+            (agu_mem_valid  && agu_mem_reg_write  && (agu_mem_rd  == id1_rd)) ||
+            (mem_wb_valid   && mem_wb_reg_write   && (mem_wb_rd   == id1_rd))
+        )
     );
 
     // ===== Milestone 2: Slot1 ID/EX Pipeline Update (Phase 2B) =====
@@ -601,14 +674,21 @@ module cpu_top (
     );
 
     // ===== Milestone 2: Slot1 ALU Datapath (Phase 2C) =====
-    // Slot1 forwarding: Simpler than slot0 (no AGU/MEM stages for slot1)
-    // Slot1 可以从 slot0 EX 结果、slot0 WB 结果或自己的 WB 结果获取
+    // Slot1 forwarding: 完整的 forwarding 网络，与 slot0 同等
+    // 优先级（最近的 in-flight 优先）：id_ex (slot0 同 cycle EX) > ex_mem > ex2_agu > agu_mem > mem_wb
+    // slot1 没有 load 数据来源，但 load 依赖已被配对规则禁止（id1_no_load_use_hazard）
     wire [31:0] slot1_rs1_fwd =
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == id_ex_rd && id_ex_valid && id_ex_reg_write) ? ex_alu_y :
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
+        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
                            id1_ex_rs1;
     wire [31:0] slot1_rs2_fwd =
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == id_ex_rd && id_ex_valid && id_ex_reg_write) ? ex_alu_y :
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
+        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
                            id1_ex_rs2;
 
@@ -881,12 +961,12 @@ module cpu_top (
     assign wb_we   = mem_wb_reg_write & mem_wb_valid;
     assign wb_data = (mem_wb_wb_sel == `WB_MEM) ? mem_wb_load : mem_wb_alu_y;
 
-    // ===== Milestone 2: Slot1 Direct Write-Back (Phase 2D - DEFERRED) =====
-    // 暂时禁用 slot1 写回，因为 PC 推进逻辑需要先支持 +8 双发射
-    // 否则 slot1 在 EX1 写回后，下一周期 slot0 会重复执行同一条指令
-    assign slot1_wb_we   = 1'b0;
-    assign slot1_wb_rd   = 5'b0;
-    assign slot1_wb_data = 32'b0;
+    // ===== Milestone 2 Phase R2: Slot1 Direct Write-Back (ENABLED) =====
+    // PC 已升级为 +8 推进 + IFQ 双 pop，避免重复执行问题。
+    // Slot1 在 EX1 阶段直接写回 regfile（ALU-only，无需 EX2/AGU/MEM）
+    assign slot1_wb_we   = id1_ex_valid && id1_ex_reg_write;
+    assign slot1_wb_rd   = id1_ex_rd;
+    assign slot1_wb_data = slot1_alu_y;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
