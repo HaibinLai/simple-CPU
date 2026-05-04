@@ -46,6 +46,19 @@ module tb_cpu;
     integer c_flush_jump   = 0;     // 无条件跳转引发的前端冲刷次数
     integer c_flush_exc    = 0;     // 异常 / mret 冲刷次数
 
+    // R3 dual-issue 观测计数器
+    integer c_dual_issue        = 0;  // 真正双发射 cycle 数（slot0 & slot1 同时 issue）
+    integer c_single_issue      = 0;  // 仅 slot0 单发射 cycle 数
+    integer c_pair_blk_notalu   = 0;  // slot1 非 ALU-only
+    integer c_pair_blk_raw      = 0;  // slot0->slot1 RAW
+    integer c_pair_blk_waw      = 0;  // 同 cycle WAW
+    integer c_pair_blk_loaduse  = 0;  // slot1 依赖 in-flight load
+    integer c_pair_blk_xcycwaw  = 0;  // 跨周期 WAW
+    integer c_pair_blk_unsafe0  = 0;  // slot0 非安全指令
+    integer c_pair_blk_novalid1 = 0;  // slot1 槽无效（IFQ 没第二条）
+    integer c_ifq_full          = 0;  // IFQ 满阻塞 cycle
+    integer c_ifq_almost_full   = 0;  // IFQ 接近满（反压 IF）
+
     // 直接窥探 DUT 内部 BPU 训练信号（仅仿真观察）
     wire dut_br_valid    = u_dut.bpu_upd_valid;
     wire dut_br_taken    = u_dut.bpu_upd_taken;
@@ -69,6 +82,19 @@ module tb_cpu;
     wire dut_id_ex_is_jump  = u_dut.id_ex_is_jump;
     wire dut_id_ex_valid    = u_dut.id_ex_valid;
     wire dut_mem_wb_valid   = u_dut.mem_wb_valid;
+
+    // R3: dual-issue 相关 peek
+    wire dut_pop0           = u_dut.ifq_pop_slot0;
+    wire dut_pop1           = u_dut.ifq_pop_slot1;
+    wire dut_id1_valid1     = u_dut.id1_id2_valid1;
+    wire dut_id1_alu_only   = u_dut.id1_is_alu_only;
+    wire dut_id1_no_raw     = u_dut.id1_no_raw_hazard;
+    wire dut_id1_no_waw     = u_dut.id1_no_waw_hazard;
+    wire dut_id1_no_lu      = u_dut.id1_no_load_use_hazard;
+    wire dut_id1_no_xwaw    = u_dut.id1_no_xcycle_waw;
+    wire dut_slot0_safe     = u_dut.id_slot0_safe_for_pair;
+    wire dut_ifq_full       = u_dut.ifq_full;
+    wire dut_ifq_almost     = u_dut.ifq_almost_full;
 
     // 在 EX 已被前端解析的有效条件分支：br_type!=NONE 且不是 JAL/JALR
     wire dut_is_cond_branch = dut_ex_is_branch && !dut_id_ex_is_jump;
@@ -118,6 +144,26 @@ module tb_cpu;
                 else if (dut_is_uncond_jump)         c_flush_jump <= c_flush_jump + 1;
                 else if (dut_is_cond_branch)         c_flush_br   <= c_flush_br   + 1;
             end
+
+            // R3: dual-issue 计数（仅在 slot0 真正 pop 的 cycle 上分类）
+            if (dut_pop0) begin
+                if (dut_pop1)         c_dual_issue   <= c_dual_issue   + 1;
+                else                  c_single_issue <= c_single_issue + 1;
+            end
+
+            // R3: 配对阻挡原因（仅在 slot0 pop 但 slot1 未 pop 时归因，按互斥优先级）
+            if (dut_pop0 && !dut_pop1) begin
+                if      (!dut_id1_valid1)   c_pair_blk_novalid1 <= c_pair_blk_novalid1 + 1;
+                else if (!dut_slot0_safe)   c_pair_blk_unsafe0  <= c_pair_blk_unsafe0  + 1;
+                else if (!dut_id1_alu_only) c_pair_blk_notalu   <= c_pair_blk_notalu   + 1;
+                else if (!dut_id1_no_raw)   c_pair_blk_raw      <= c_pair_blk_raw      + 1;
+                else if (!dut_id1_no_waw)   c_pair_blk_waw      <= c_pair_blk_waw      + 1;
+                else if (!dut_id1_no_lu)    c_pair_blk_loaduse  <= c_pair_blk_loaduse  + 1;
+                else if (!dut_id1_no_xwaw)  c_pair_blk_xcycwaw  <= c_pair_blk_xcycwaw  + 1;
+            end
+
+            if (dut_ifq_full)       c_ifq_full        <= c_ifq_full        + 1;
+            if (dut_ifq_almost)     c_ifq_almost_full <= c_ifq_almost_full + 1;
         end
     end
 
@@ -146,6 +192,15 @@ module tb_cpu;
             $display("[TB] D$ access=%0d hit=%0d miss=%0d miss_rate=%f",
                      dc_access, dc_hit, dc_miss,
                      (dc_access == 0) ? 0.0 : 1.0*dc_miss/dc_access);
+            $display("[TB] dual_issue=%0d single_issue=%0d dual_rate=%f",
+                     c_dual_issue, c_single_issue,
+                     (c_dual_issue + c_single_issue == 0) ? 0.0 :
+                       1.0*c_dual_issue/(c_dual_issue + c_single_issue));
+            $display("[TB] pair_blk: novalid1=%0d unsafe0=%0d notalu=%0d raw=%0d waw=%0d loaduse=%0d xcycwaw=%0d",
+                     c_pair_blk_novalid1, c_pair_blk_unsafe0, c_pair_blk_notalu,
+                     c_pair_blk_raw, c_pair_blk_waw, c_pair_blk_loaduse, c_pair_blk_xcycwaw);
+            $display("[TB] ifq: full=%0d almost_full=%0d",
+                     c_ifq_full, c_ifq_almost_full);
         end
     endtask
 

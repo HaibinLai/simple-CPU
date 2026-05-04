@@ -220,9 +220,9 @@ module cpu_top (
     wire id2_issue_slot1;
     wire ifq_pop_slot1  = ifq_pop_slot0 && id2_issue_slot1;
 
-    wire [2:0]  ifq_count;
+    wire [3:0]  ifq_count;
 
-    ifq #(.DEPTH(4), .AW(2)) u_ifq (
+    ifq #(.DEPTH(8), .AW(3)) u_ifq (
         .clk    (clk),
         .rst_n  (rst_n),
         .flush  (ex_redirect),
@@ -320,8 +320,10 @@ module cpu_top (
     wire [4:0]  id1_rs2   = id1_instr[24:20];
     wire [4:0]  id1_rd    = id1_instr[11:7];
 
-    // Slot1 ALU-only 约束：仅允许 ALU 指令（OP_IMM 或 OP_REG）
-    wire id1_is_alu_only = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
+    // Slot1 ALU-only 约束：允许 OP_REG / OP_IMM / OP_LUI / OP_AUIPC
+    // （LUI/AUIPC 是单加法 / bypass，不访存，不重定向）
+    wire id1_is_alu_only = (id1_opcode == `OP_REG)  || (id1_opcode == `OP_IMM) ||
+                           (id1_opcode == `OP_LUI)  || (id1_opcode == `OP_AUIPC);
 
     // Slot1 control 解码（仅供约束检查；暂不用于执行）
     wire [2:0] id1_imm_type;
@@ -356,10 +358,14 @@ module cpu_top (
     // Slot1 配对约束（仅依赖 ID 阶段信号；in-flight load 检查在 id_ex 声明后做）：
     // 1. Slot1 有效 && 是 ALU-only 指令
     // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
+    wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
+    wire slot1_rs2_used = (id1_opcode == `OP_REG);
+    // LUI/AUIPC 不读寄存器，不参与 RAW/load-use 检查
+
     wire id1_no_raw_hazard = ~(
         (id_reg_write && (id_rd != 5'd0)) && (
-            ((id1_rs1 == id_rd) && (id1_rs1 != 5'd0)) ||
-            ((id1_rs2 == id_rd) && (id1_rs2 != 5'd0))
+            (slot1_rs1_used && (id1_rs1 == id_rd) && (id1_rs1 != 5'd0)) ||
+            (slot1_rs2_used && (id1_rs2 == id_rd) && (id1_rs2 != 5'd0))
         )
     );
 
@@ -370,9 +376,6 @@ module cpu_top (
         (id_rd == id1_rd) && (id_rd != 5'd0)
     );
 
-    wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
-    wire slot1_rs2_used = (id1_opcode == `OP_REG);
-
     // R2 BUG#2: in-flight load → slot1 RAW（在 id_ex 声明之后定义）
     wire id1_no_load_use_hazard;
     // R2 BUG#5: cross-cycle WAW（在 id_ex/ex_mem/... 声明之后定义）
@@ -380,10 +383,12 @@ module cpu_top (
 
     // R2 BUG#4 修复：slot0 必须是"无副作用 / 无重定向" 的指令，才允许 slot1 配对。
     // 否则 slot0 mispredict/exception 时 slot1 已经写回 regfile，无法撤销。
-    // 安全集合：slot0 必须不是 branch/jump/ecall/mret/illegal，且不是 store（避免乱序内存）。
+    // R3 放宽：允许 slot0 是 store（store 不修改控制流，不会触发 ex_redirect；
+    //   store 没有 rd，因此不会与 slot1 形成 WAW；slot1 与 store 内存无序也无影响，
+    //   因为 slot1 是 ALU-only 不访存）。
     wire id_slot0_safe_for_pair = (id_br_type == `BR_NONE) && !id_is_jump &&
-                                   !id_is_ecall && !id_is_mret && !id_is_illegal &&
-                                   !id_mem_write;
+                                   !id_is_ecall && !id_is_mret && !id_is_illegal;
+                                   // 注：去掉 !id_mem_write，允许 store 配对
 
     // Slot1 issue 条件
     assign id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only &&
@@ -701,7 +706,7 @@ module cpu_top (
         .imm      (slot1_imm)
     );
 
-    wire [31:0] slot1_a = slot1_rs1_fwd;  // ALU-only, always use rs1
+    wire [31:0] slot1_a = (id1_ex_a_src == `ASRC_PC) ? id1_ex_pc : slot1_rs1_fwd;
     wire [31:0] slot1_b = (id1_ex_b_src == `BSRC_IMM) ? slot1_imm : slot1_rs2_fwd;
 
     wire [31:0] slot1_alu_y;
