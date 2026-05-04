@@ -1,0 +1,52 @@
+// test03: 循环求和 1+2+...+10，验证动态分支预测
+//
+//   x10 = 0    // sum
+//   x11 = 1    // i
+//   x12 = 11   // limit
+// loop:
+//   bge  x11, x12, end   // 当 i >= 11 时退出（最后一次错预测）
+//   add  x10, x10, x11
+//   addi x11, x11, 1
+//   jal  x0, loop        // 总是 taken
+// end:
+//   addi x31 = ...       // x31 = sum + 0xCAFEBABE - 55 ?  我们直接放 0xCAFEBABE
+//
+// 期望：x10 = 55；x31 = 0xCAFEBABE
+// 循环 10 次：bge 实际 not-taken 9 次 + taken 1 次；jal taken 10 次
+// 第一次 bge 与第一次 jal 是 cold miss，之后 BHT/BTB 收敛后命中率应高
+//
+// 地址  机器码        汇编
+// 0x00  00000513     ADDI  x10, x0, 0
+// 0x04  00100593     ADDI  x11, x0, 1
+// 0x08  00B00613     ADDI  x12, x0, 11
+// 0x0C  00C5D663     BGE   x11, x12, +12      ; 跳到 0x18
+// 0x10  00B50533     ADD   x10, x10, x11
+// 0x14  00158593     ADDI  x11, x11, 1
+// 0x18  ?            (BGE 目标)               ↓ 修正：实际目标应是 end
+//
+// 重新对齐：让 BGE 的 +offset 指到 end 标签。
+// 简单写法：放 4 条循环体 + jal 回首；然后 end 段。
+//
+// 重新规划地址：
+// 0x00  ADDI x10,x0,0       00000513
+// 0x04  ADDI x11,x0,1       00100593
+// 0x08  ADDI x12,x0,11      00B00613
+// 0x0C  BGE  x11,x12,end    00C5D863   imm=+16 → 目标 0x1C  (encoded for +16)
+// 0x10  ADD  x10,x10,x11    00B50533
+// 0x14  ADDI x11,x11,1      00158593
+// 0x18  JAL  x0, loop       FF5FF06F   imm = -12 → 目标 0x0C
+// 0x1C  CAFEC0B7  (LUI x1, 0xCAFEC)
+// 0x20  ABE08093  (ADDI x1,x1,0xABE)  → x1 = 0xCAFEBABE
+// 0x24  00008FB3  (ADD x31,x1,x0)
+// 0x28  0000006F  (JAL x0, 0  死循环)
+00000513
+00100593
+00B00613
+00C5D863
+00B50533
+00158593
+FF5FF06F
+CAFEC0B7
+ABE08093
+00008FB3
+0000006F

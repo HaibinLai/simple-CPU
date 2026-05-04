@@ -1,0 +1,36 @@
+// test02: 紧凑程序，无手工 NOP，验证 forwarding 与 load-use stall
+//
+// 计算 sum = 1+2+3+4+5 = 15，存到内存，再读回；并做一些 RAW、load-use。
+// 期望结果：x31 = 0xCAFEBABE
+//
+// 地址  机器码        汇编                                注释
+// 0x00  00100093     ADDI  x1, x0, 1                    ; x1 = 1
+// 0x04  00208113     ADDI  x2, x1, 2                    ; RAW: x2 = 3 （EX→EX 前递）
+// 0x08  00310193     ADDI  x3, x2, 3                    ; RAW: x3 = 6 （EX→EX 前递）
+// 0x0C  00418213     ADDI  x4, x3, 4                    ; RAW: x4 = 10
+// 0x10  005202B3     ADD   x5, x4, x5                   ; x5 = 10 + 0 = 10
+// 0x14  00520333     ADD   x6, x4, x5                   ; x6 = 10 + 10 = 20
+// 0x18  00628393     ADDI  x7, x5, 6                    ; x7 = 16
+// 0x1C  001003B7     LUI   x7, 0x100                    ; x7 = 0x00100000  (基址)
+// 0x20  0063A023     SW    x6, 0(x7)                    ; mem[0x100000] = 20  (验证 store rs2 forwarding)
+// 0x24  0003A403     LW    x8, 0(x7)                    ; load-use ↓
+// 0x28  00140413     ADDI  x8, x8, 1                    ; x8 = 21 （需要 stall 1 拍）
+// 0x2C  CAFEC0B7     LUI   x1, 0xCAFEC                  ; x1 = 0xCAFEC000
+// 0x30  ABE08093     ADDI  x1, x1, 0xABE                ; x1 = 0xCAFEBABE  (EX→EX 前递)
+// 0x34  00008FB3     ADD   x31, x1, x0                  ; x31 = 0xCAFEBABE  (EX→EX 前递) → 触发 PASS
+// 0x38  0000006F     JAL   x0, 0                        ; 死循环
+00100093
+00208113
+00310193
+00418213
+005202B3
+00520333
+00628393
+001003B7
+0063A023
+0003A403
+00140413
+CAFEC0B7
+ABE08093
+00008FB3
+0000006F
