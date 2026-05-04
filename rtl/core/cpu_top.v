@@ -43,6 +43,7 @@ module cpu_top (
     reg        ex_mem_reg_write;
     reg [1:0]  ex_mem_wb_sel;
     reg        ex_mem_valid;
+    reg [3:0]  ex_mem_rob_tag;
 
     // EX2/AGU
     reg [31:0] ex2_agu_pc;
@@ -55,6 +56,7 @@ module cpu_top (
     reg        ex2_agu_reg_write;
     reg [1:0]  ex2_agu_wb_sel;
     reg        ex2_agu_valid;
+    reg [3:0]  ex2_agu_rob_tag;
 
     // AGU/MEM
     reg [31:0] agu_mem_pc;
@@ -67,6 +69,7 @@ module cpu_top (
     reg        agu_mem_reg_write;
     reg [1:0]  agu_mem_wb_sel;
     reg        agu_mem_valid;
+    reg [3:0]  agu_mem_rob_tag;
     // MEM/WB
     reg [31:0] mem_wb_pc;
     reg [31:0] mem_wb_instr;
@@ -76,6 +79,7 @@ module cpu_top (
     reg        mem_wb_reg_write;
     reg [1:0]  mem_wb_wb_sel;
     reg        mem_wb_valid;
+    reg [3:0]  mem_wb_rob_tag;
 
     // MEM 阶段 load 扩展结果（用于 WB，也可用于 EX 前递）
     reg [31:0] mem_load_data;
@@ -437,6 +441,10 @@ module cpu_top (
     );
 
     // ===== Milestone 2: Slot1 ID/EX Pipeline Registers (Phase 2B) =====
+    // M3.2: ROB alloc tag forward decl（实例化在文件末尾）
+    wire [3:0]  rob_alloc_tag_0;
+    wire [3:0]  rob_alloc_tag_1;
+
     reg [31:0] id1_ex_pc;
     reg [31:0] id1_ex_instr;
     reg [31:0] id1_ex_rs1, id1_ex_rs2, id1_ex_imm;
@@ -448,6 +456,7 @@ module cpu_top (
     reg [1:0]  id1_ex_wb_sel;
     reg        id1_ex_valid;
     reg [2:0]  id1_ex_imm_type;
+    reg [3:0]  id1_ex_rob_tag;
 
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
@@ -467,6 +476,7 @@ module cpu_top (
     reg        id_ex_is_ecall, id_ex_is_mret, id_ex_is_illegal;
     reg        id_ex_pred_taken;
     reg [31:0] id_ex_pred_target;
+    reg [3:0]  id_ex_rob_tag;
 
     // 冒险检测（load-use）
     hazard u_hazard (
@@ -556,6 +566,7 @@ module cpu_top (
             id1_ex_wb_sel     <= id1_wb_sel;
             id1_ex_valid      <= id2_issue_slot1;     // 仅当 slot1 满足配对条件时，流水线才推进
             id1_ex_imm_type   <= id1_imm_type;
+            id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
         end
     end
 
@@ -625,6 +636,7 @@ module cpu_top (
             id_ex_is_illegal  <= id_is_illegal;
             id_ex_pred_taken  <= id1_id2_pred_taken;
             id_ex_pred_target <= id1_id2_pred_target;
+            id_ex_rob_tag     <= rob_alloc_tag_0;     // M3.2: 携带 ROB tag
         end
     end
 
@@ -799,6 +811,7 @@ module cpu_top (
             ex_mem_reg_write  <= id_ex_reg_write;
             ex_mem_wb_sel     <= id_ex_wb_sel;
             ex_mem_valid      <= id_ex_valid;
+            ex_mem_rob_tag    <= id_ex_rob_tag;
         end
     end
 
@@ -828,6 +841,7 @@ module cpu_top (
             ex2_agu_reg_write  <= ex_mem_reg_write;
             ex2_agu_wb_sel     <= ex_mem_wb_sel;
             ex2_agu_valid      <= ex_mem_valid;
+            ex2_agu_rob_tag    <= ex_mem_rob_tag;
         end
     end
 
@@ -857,6 +871,7 @@ module cpu_top (
             agu_mem_reg_write  <= ex2_agu_reg_write;
             agu_mem_wb_sel     <= ex2_agu_wb_sel;
             agu_mem_valid      <= ex2_agu_valid;
+            agu_mem_rob_tag    <= ex2_agu_rob_tag;
         end
     end
 
@@ -958,6 +973,7 @@ module cpu_top (
             mem_wb_reg_write <= agu_mem_reg_write;
             mem_wb_wb_sel    <= agu_mem_wb_sel;
             mem_wb_valid     <= agu_mem_valid;
+            mem_wb_rob_tag   <= agu_mem_rob_tag;
         end
     end
 
@@ -980,90 +996,114 @@ module cpu_top (
     assign dbg_wb_rd    = wb_rd;
     assign dbg_wb_data  = wb_data;
 
-    // ===== Milestone 3 Phase M3.1: ROB Skeleton (NOT WIRED) =====
-    // 空 ROB：所有 alloc/wb 输入 tied 到 0，输出悬空。
-    // 仅保证模块编译通过；后续 M3.2 起逐步接线。
-    wire [4:0] rob_count_unused;
-    wire [3:0] rob_alloc_tag_0_unused, rob_alloc_tag_1_unused;
-    wire       rob_full_unused, rob_almost_full_unused;
-    wire       rob_commit_valid_0_unused, rob_commit_valid_1_unused;
-    wire [3:0] rob_commit_tag_0_unused, rob_commit_tag_1_unused;
-    wire [31:0] rob_commit_pc_0_unused, rob_commit_pc_1_unused;
-    wire [4:0]  rob_commit_rd_0_unused, rob_commit_rd_1_unused;
-    wire        rob_commit_rw_0_unused, rob_commit_rw_1_unused;
-    wire [31:0] rob_commit_res_0_unused, rob_commit_res_1_unused;
-    wire        rob_commit_st_0_unused, rob_commit_st_1_unused;
-    wire [31:0] rob_commit_sa_0_unused, rob_commit_sa_1_unused;
-    wire [31:0] rob_commit_sd_0_unused, rob_commit_sd_1_unused;
-    wire [3:0]  rob_commit_sb_0_unused, rob_commit_sb_1_unused;
-    wire        rob_commit_exc_0_unused, rob_commit_exc_1_unused;
-    wire [31:0] rob_commit_cause_0_unused, rob_commit_cause_1_unused;
+    // ===== Milestone 3 Phase M3.2: ROB shadow tracking (alloc + wb + commit观测) =====
+    // ROB 仍然不驱动 regfile（旧路径仍生效）；ROB 跟踪 in-flight 状态。
+    wire [4:0]  rob_count;
+    wire        rob_full, rob_almost_full;
+
+    // commit 视图（M3.2 中仅观测）
+    wire        rob_commit_valid_0, rob_commit_valid_1;
+    wire [3:0]  rob_commit_tag_0, rob_commit_tag_1;
+    wire [31:0] rob_commit_pc_0, rob_commit_pc_1;
+    wire [4:0]  rob_commit_rd_0, rob_commit_rd_1;
+    wire        rob_commit_rw_0, rob_commit_rw_1;
+    wire [31:0] rob_commit_res_0, rob_commit_res_1;
+    wire        rob_commit_st_0, rob_commit_st_1;
+    wire [31:0] rob_commit_sa_0, rob_commit_sa_1;
+    wire [31:0] rob_commit_sd_0, rob_commit_sd_1;
+    wire [3:0]  rob_commit_sb_0, rob_commit_sb_1;
+    wire        rob_commit_exc_0, rob_commit_exc_1;
+    wire [31:0] rob_commit_cause_0, rob_commit_cause_1;
+
+    // alloc 来自 IFQ 的 pop（issue 时刻分配 tag）
+    // 注意：使用同 cycle 的 alloc 输出 tag，写入 ID/EX 流水线寄存器。
+    wire        rob_alloc_v0 = ifq_pop_slot0;
+    wire        rob_alloc_v1 = ifq_pop_slot1;
+    wire [31:0] rob_alloc_pc_0_w = id1_id2_pc0;
+    wire [31:0] rob_alloc_pc_1_w = id1_id2_pc1;
+    wire [4:0]  rob_alloc_rd_0_w = id_rd;
+    wire [4:0]  rob_alloc_rd_1_w = id1_rd;
+    wire        rob_alloc_rw_0_w = id_reg_write;
+    wire        rob_alloc_rw_1_w = id1_reg_write;
+    wire        rob_alloc_st_0_w = id_mem_write;
+    wire        rob_alloc_st_1_w = 1'b0;        // slot1 不会是 store
+    wire        rob_alloc_br_0_w = (id_br_type != `BR_NONE) || id_is_jump;
+    wire        rob_alloc_br_1_w = 1'b0;        // slot1 不会是 branch
+
+    // writeback：slot0 在 mem_wb 阶段；slot1 在 EX1 阶段
+    wire        rob_wb_v0 = mem_wb_valid;
+    wire [3:0]  rob_wb_t0 = mem_wb_rob_tag;
+    wire [31:0] rob_wb_r0 = (mem_wb_wb_sel == `WB_MEM) ? mem_wb_load : mem_wb_alu_y;
+    wire        rob_wb_v1 = id1_ex_valid;
+    wire [3:0]  rob_wb_t1 = id1_ex_rob_tag;
+    wire [31:0] rob_wb_r1 = slot1_alu_y;
+
+    // commit pop：跟随 commit_valid（in-order 自然约束）
+    wire [1:0]  rob_pop_cnt = (rob_commit_valid_0 ? 2'd1 : 2'd0)
+                             + (rob_commit_valid_1 ? 2'd1 : 2'd0);
 
     rob #(.DEPTH(16), .AW(4)) u_rob (
         .clk                (clk),
         .rst_n              (rst_n),
-        .flush              (1'b0),
-        // alloc tied 0
-        .alloc_valid_0      (1'b0),
-        .alloc_pc_0         (32'b0),
-        .alloc_rd_0         (5'b0),
-        .alloc_reg_write_0  (1'b0),
-        .alloc_is_store_0   (1'b0),
-        .alloc_is_branch_0  (1'b0),
-        .alloc_tag_0        (rob_alloc_tag_0_unused),
-        .alloc_valid_1      (1'b0),
-        .alloc_pc_1         (32'b0),
-        .alloc_rd_1         (5'b0),
-        .alloc_reg_write_1  (1'b0),
-        .alloc_is_store_1   (1'b0),
-        .alloc_is_branch_1  (1'b0),
-        .alloc_tag_1        (rob_alloc_tag_1_unused),
-        .full               (rob_full_unused),
-        .almost_full        (rob_almost_full_unused),
-        // wb tied 0
-        .wb_valid_0         (1'b0),
-        .wb_tag_0           (4'b0),
-        .wb_result_0        (32'b0),
+        .flush              (ex_redirect),
+        .alloc_valid_0      (rob_alloc_v0),
+        .alloc_pc_0         (rob_alloc_pc_0_w),
+        .alloc_rd_0         (rob_alloc_rd_0_w),
+        .alloc_reg_write_0  (rob_alloc_rw_0_w),
+        .alloc_is_store_0   (rob_alloc_st_0_w),
+        .alloc_is_branch_0  (rob_alloc_br_0_w),
+        .alloc_tag_0        (rob_alloc_tag_0),
+        .alloc_valid_1      (rob_alloc_v1),
+        .alloc_pc_1         (rob_alloc_pc_1_w),
+        .alloc_rd_1         (rob_alloc_rd_1_w),
+        .alloc_reg_write_1  (rob_alloc_rw_1_w),
+        .alloc_is_store_1   (rob_alloc_st_1_w),
+        .alloc_is_branch_1  (rob_alloc_br_1_w),
+        .alloc_tag_1        (rob_alloc_tag_1),
+        .full               (rob_full),
+        .almost_full        (rob_almost_full),
+        .wb_valid_0         (rob_wb_v0),
+        .wb_tag_0           (rob_wb_t0),
+        .wb_result_0        (rob_wb_r0),
         .wb_exception_0     (1'b0),
         .wb_exc_cause_0     (32'b0),
         .wb_store_addr_0    (32'b0),
         .wb_store_data_0    (32'b0),
         .wb_store_be_0      (4'b0),
-        .wb_valid_1         (1'b0),
-        .wb_tag_1           (4'b0),
-        .wb_result_1        (32'b0),
+        .wb_valid_1         (rob_wb_v1),
+        .wb_tag_1           (rob_wb_t1),
+        .wb_result_1        (rob_wb_r1),
         .wb_exception_1     (1'b0),
         .wb_exc_cause_1     (32'b0),
         .wb_store_addr_1    (32'b0),
         .wb_store_data_1    (32'b0),
         .wb_store_be_1      (4'b0),
-        // commit outputs unused
-        .commit_valid_0     (rob_commit_valid_0_unused),
-        .commit_tag_0       (rob_commit_tag_0_unused),
-        .commit_pc_0        (rob_commit_pc_0_unused),
-        .commit_rd_0        (rob_commit_rd_0_unused),
-        .commit_reg_write_0 (rob_commit_rw_0_unused),
-        .commit_result_0    (rob_commit_res_0_unused),
-        .commit_is_store_0  (rob_commit_st_0_unused),
-        .commit_store_addr_0(rob_commit_sa_0_unused),
-        .commit_store_data_0(rob_commit_sd_0_unused),
-        .commit_store_be_0  (rob_commit_sb_0_unused),
-        .commit_exception_0 (rob_commit_exc_0_unused),
-        .commit_exc_cause_0 (rob_commit_cause_0_unused),
-        .commit_valid_1     (rob_commit_valid_1_unused),
-        .commit_tag_1       (rob_commit_tag_1_unused),
-        .commit_pc_1        (rob_commit_pc_1_unused),
-        .commit_rd_1        (rob_commit_rd_1_unused),
-        .commit_reg_write_1 (rob_commit_rw_1_unused),
-        .commit_result_1    (rob_commit_res_1_unused),
-        .commit_is_store_1  (rob_commit_st_1_unused),
-        .commit_store_addr_1(rob_commit_sa_1_unused),
-        .commit_store_data_1(rob_commit_sd_1_unused),
-        .commit_store_be_1  (rob_commit_sb_1_unused),
-        .commit_exception_1 (rob_commit_exc_1_unused),
-        .commit_exc_cause_1 (rob_commit_cause_1_unused),
-        .commit_pop_count   (2'd0),
-        .count              (rob_count_unused)
+        .commit_valid_0     (rob_commit_valid_0),
+        .commit_tag_0       (rob_commit_tag_0),
+        .commit_pc_0        (rob_commit_pc_0),
+        .commit_rd_0        (rob_commit_rd_0),
+        .commit_reg_write_0 (rob_commit_rw_0),
+        .commit_result_0    (rob_commit_res_0),
+        .commit_is_store_0  (rob_commit_st_0),
+        .commit_store_addr_0(rob_commit_sa_0),
+        .commit_store_data_0(rob_commit_sd_0),
+        .commit_store_be_0  (rob_commit_sb_0),
+        .commit_exception_0 (rob_commit_exc_0),
+        .commit_exc_cause_0 (rob_commit_cause_0),
+        .commit_valid_1     (rob_commit_valid_1),
+        .commit_tag_1       (rob_commit_tag_1),
+        .commit_pc_1        (rob_commit_pc_1),
+        .commit_rd_1        (rob_commit_rd_1),
+        .commit_reg_write_1 (rob_commit_rw_1),
+        .commit_result_1    (rob_commit_res_1),
+        .commit_is_store_1  (rob_commit_st_1),
+        .commit_store_addr_1(rob_commit_sa_1),
+        .commit_store_data_1(rob_commit_sd_1),
+        .commit_store_be_1  (rob_commit_sb_1),
+        .commit_exception_1 (rob_commit_exc_1),
+        .commit_exc_cause_1 (rob_commit_cause_1),
+        .commit_pop_count   (rob_pop_cnt),
+        .count              (rob_count)
     );
 
 endmodule
