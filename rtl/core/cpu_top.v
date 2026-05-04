@@ -980,4 +980,90 @@ module cpu_top (
     assign dbg_wb_rd    = wb_rd;
     assign dbg_wb_data  = wb_data;
 
+    // ===== Milestone 3 Phase M3.1: ROB Skeleton (NOT WIRED) =====
+    // 空 ROB：所有 alloc/wb 输入 tied 到 0，输出悬空。
+    // 仅保证模块编译通过；后续 M3.2 起逐步接线。
+    wire [4:0] rob_count_unused;
+    wire [3:0] rob_alloc_tag_0_unused, rob_alloc_tag_1_unused;
+    wire       rob_full_unused, rob_almost_full_unused;
+    wire       rob_commit_valid_0_unused, rob_commit_valid_1_unused;
+    wire [3:0] rob_commit_tag_0_unused, rob_commit_tag_1_unused;
+    wire [31:0] rob_commit_pc_0_unused, rob_commit_pc_1_unused;
+    wire [4:0]  rob_commit_rd_0_unused, rob_commit_rd_1_unused;
+    wire        rob_commit_rw_0_unused, rob_commit_rw_1_unused;
+    wire [31:0] rob_commit_res_0_unused, rob_commit_res_1_unused;
+    wire        rob_commit_st_0_unused, rob_commit_st_1_unused;
+    wire [31:0] rob_commit_sa_0_unused, rob_commit_sa_1_unused;
+    wire [31:0] rob_commit_sd_0_unused, rob_commit_sd_1_unused;
+    wire [3:0]  rob_commit_sb_0_unused, rob_commit_sb_1_unused;
+    wire        rob_commit_exc_0_unused, rob_commit_exc_1_unused;
+    wire [31:0] rob_commit_cause_0_unused, rob_commit_cause_1_unused;
+
+    rob #(.DEPTH(16), .AW(4)) u_rob (
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .flush              (1'b0),
+        // alloc tied 0
+        .alloc_valid_0      (1'b0),
+        .alloc_pc_0         (32'b0),
+        .alloc_rd_0         (5'b0),
+        .alloc_reg_write_0  (1'b0),
+        .alloc_is_store_0   (1'b0),
+        .alloc_is_branch_0  (1'b0),
+        .alloc_tag_0        (rob_alloc_tag_0_unused),
+        .alloc_valid_1      (1'b0),
+        .alloc_pc_1         (32'b0),
+        .alloc_rd_1         (5'b0),
+        .alloc_reg_write_1  (1'b0),
+        .alloc_is_store_1   (1'b0),
+        .alloc_is_branch_1  (1'b0),
+        .alloc_tag_1        (rob_alloc_tag_1_unused),
+        .full               (rob_full_unused),
+        .almost_full        (rob_almost_full_unused),
+        // wb tied 0
+        .wb_valid_0         (1'b0),
+        .wb_tag_0           (4'b0),
+        .wb_result_0        (32'b0),
+        .wb_exception_0     (1'b0),
+        .wb_exc_cause_0     (32'b0),
+        .wb_store_addr_0    (32'b0),
+        .wb_store_data_0    (32'b0),
+        .wb_store_be_0      (4'b0),
+        .wb_valid_1         (1'b0),
+        .wb_tag_1           (4'b0),
+        .wb_result_1        (32'b0),
+        .wb_exception_1     (1'b0),
+        .wb_exc_cause_1     (32'b0),
+        .wb_store_addr_1    (32'b0),
+        .wb_store_data_1    (32'b0),
+        .wb_store_be_1      (4'b0),
+        // commit outputs unused
+        .commit_valid_0     (rob_commit_valid_0_unused),
+        .commit_tag_0       (rob_commit_tag_0_unused),
+        .commit_pc_0        (rob_commit_pc_0_unused),
+        .commit_rd_0        (rob_commit_rd_0_unused),
+        .commit_reg_write_0 (rob_commit_rw_0_unused),
+        .commit_result_0    (rob_commit_res_0_unused),
+        .commit_is_store_0  (rob_commit_st_0_unused),
+        .commit_store_addr_0(rob_commit_sa_0_unused),
+        .commit_store_data_0(rob_commit_sd_0_unused),
+        .commit_store_be_0  (rob_commit_sb_0_unused),
+        .commit_exception_0 (rob_commit_exc_0_unused),
+        .commit_exc_cause_0 (rob_commit_cause_0_unused),
+        .commit_valid_1     (rob_commit_valid_1_unused),
+        .commit_tag_1       (rob_commit_tag_1_unused),
+        .commit_pc_1        (rob_commit_pc_1_unused),
+        .commit_rd_1        (rob_commit_rd_1_unused),
+        .commit_reg_write_1 (rob_commit_rw_1_unused),
+        .commit_result_1    (rob_commit_res_1_unused),
+        .commit_is_store_1  (rob_commit_st_1_unused),
+        .commit_store_addr_1(rob_commit_sa_1_unused),
+        .commit_store_data_1(rob_commit_sd_1_unused),
+        .commit_store_be_1  (rob_commit_sb_1_unused),
+        .commit_exception_1 (rob_commit_exc_1_unused),
+        .commit_exc_cause_1 (rob_commit_cause_1_unused),
+        .commit_pop_count   (2'd0),
+        .count              (rob_count_unused)
+    );
+
 endmodule
