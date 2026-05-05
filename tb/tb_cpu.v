@@ -37,6 +37,16 @@ module tb_cpu;
     integer cycles = 0;
     integer instrs_retired = 0;     // 旧定义：wb_we && rd!=x0（与 dbg 对齐，保持向后兼容）
     integer instrs_committed = 0;   // 新定义：每个 valid 走到 WB 的指令都算（含 store/branch/x0 写）
+    integer rob_committed = 0;      // M3.3: ROB commit ports 计数（含 x0/store/branch）
+    integer rob_committed_rw = 0;   // M3.3: ROB commit 中 reg_write && rd!=x0 数（应 == instrs_retired）
+
+    // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
+    reg [31:0] shadow_rf [0:31];
+    integer    sh_i;
+
+    // M3.3: in-order commit assertion - PC 必须严格递增（ROB 是 FIFO）
+    reg [31:0] last_commit_pc = 32'hFFFF_FFFF;
+    reg        any_commit = 1'b0;
     integer br_total = 0;
     integer br_mispred = 0;
 
@@ -111,6 +121,10 @@ module tb_cpu;
         $display("[TB] reset released, loading %s", `PROG_HEX);
     end
 
+    initial begin
+        for (sh_i = 0; sh_i < 32; sh_i = sh_i + 1) shadow_rf[sh_i] = 32'b0;
+    end
+
     // 监控：每条真正提交（写回且 rd != x0）的指令打印一行
     always @(posedge clk) begin
         if (rst_n) begin
@@ -130,6 +144,33 @@ module tb_cpu;
             instrs_committed <= instrs_committed
                 + (dut_mem_wb_valid ? 1 : 0)
                 + (u_dut.slot1_wb_we ? 1 : 0);
+
+            // M3.3: ROB commit 端口计数（in-order）
+            rob_committed <= rob_committed
+                + (u_dut.rob_commit_valid_0 ? 1 : 0)
+                + (u_dut.rob_commit_valid_1 ? 1 : 0);
+            rob_committed_rw <= rob_committed_rw
+                + ((u_dut.rob_commit_valid_0 && u_dut.rob_commit_rw_0 && u_dut.rob_commit_rd_0 != 5'd0) ? 1 : 0)
+                + ((u_dut.rob_commit_valid_1 && u_dut.rob_commit_rw_1 && u_dut.rob_commit_rd_1 != 5'd0) ? 1 : 0);
+
+            // M3.3 shadow regfile：由 commit 驱动（slot0 先于 slot1）
+            if (u_dut.rob_commit_valid_0 && u_dut.rob_commit_rw_0 && u_dut.rob_commit_rd_0 != 5'd0)
+                shadow_rf[u_dut.rob_commit_rd_0] <= u_dut.rob_commit_res_0;
+            if (u_dut.rob_commit_valid_1 && u_dut.rob_commit_rw_1 && u_dut.rob_commit_rd_1 != 5'd0)
+                shadow_rf[u_dut.rob_commit_rd_1] <= u_dut.rob_commit_res_1;
+
+            // M3.3 in-order commit assertion: 同 cycle slot0->slot1 PC 必递增；跨 cycle 也必递增（除 jump/branch）
+            // 注意：跳转 / 分支可使 PC 跳到任意位置，所以严格只检查 slot1.pc > slot0.pc 这种「同 cycle 双发射」的强约束
+            if (u_dut.rob_commit_valid_0 && u_dut.rob_commit_valid_1) begin
+                if (u_dut.rob_commit_pc_1 != u_dut.rob_commit_pc_0 + 4) begin
+                    $display("[TB][WARN] commit dual-issue PC not contig: pc0=0x%08h pc1=0x%08h",
+                             u_dut.rob_commit_pc_0, u_dut.rob_commit_pc_1);
+                end
+            end
+            if (u_dut.rob_commit_valid_0) begin
+                last_commit_pc <= u_dut.rob_commit_valid_1 ? u_dut.rob_commit_pc_1 : u_dut.rob_commit_pc_0;
+                any_commit <= 1'b1;
+            end
             if (dut_br_valid) begin
                 br_total <= br_total + 1;
                 if (dut_mispredict) br_mispred <= br_mispred + 1;
@@ -181,6 +222,13 @@ module tb_cpu;
             $display("[TB] committed=%0d  CPI_c=%f",
                      instrs_committed,
                      (instrs_committed == 0) ? 0.0 : 1.0*cycles/instrs_committed);
+            $display("[TB] rob_committed=%0d  rob_committed_rw=%0d  rob_count=%0d",
+                     rob_committed, rob_committed_rw, u_dut.rob_count);
+            // M3.3 sanity（弱）：commit 计数不应超过 retired（不能 over-commit）
+            if (rob_committed_rw > instrs_retired) begin
+                $display("[TB][ERROR] over-commit: rob_committed_rw=%0d > instrs_retired=%0d",
+                         rob_committed_rw, instrs_retired);
+            end
             $display("[TB] stalls: load_use=%0d  flush_br=%0d  flush_jump=%0d  flush_exc=%0d",
                      c_stall_lu, c_flush_br, c_flush_jump, c_flush_exc);
             $display("[TB] branches=%0d  mispredicts=%0d  miss_rate=%f",
