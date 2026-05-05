@@ -39,6 +39,7 @@ module tb_cpu;
     integer instrs_committed = 0;   // 新定义：每个 valid 走到 WB 的指令都算（含 store/branch/x0 写）
     integer rob_committed = 0;      // M3.3: ROB commit ports 计数（含 x0/store/branch）
     integer rob_committed_rw = 0;   // M3.3: ROB commit 中 reg_write && rd!=x0 数（应 == instrs_retired）
+    integer c_rn_stall = 0;         // M3.4a: rename stall 计数
 
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
@@ -159,6 +160,9 @@ module tb_cpu;
             if (u_dut.rob_commit_valid_1 && u_dut.rob_commit_rw_1 && u_dut.rob_commit_rd_1 != 5'd0)
                 shadow_rf[u_dut.rob_commit_rd_1] <= u_dut.rob_commit_res_1;
 
+            // M3.4a observability: rename stall 计数（M3.4c 起需为 0）
+            if (u_dut.rn_stall) c_rn_stall <= c_rn_stall + 1;
+
             // M3.3 in-order commit assertion: 同 cycle slot0->slot1 PC 必递增；跨 cycle 也必递增（除 jump/branch）
             // 注意：跳转 / 分支可使 PC 跳到任意位置，所以严格只检查 slot1.pc > slot0.pc 这种「同 cycle 双发射」的强约束
             if (u_dut.rob_commit_valid_0 && u_dut.rob_commit_valid_1) begin
@@ -224,6 +228,8 @@ module tb_cpu;
                      (instrs_committed == 0) ? 0.0 : 1.0*cycles/instrs_committed);
             $display("[TB] rob_committed=%0d  rob_committed_rw=%0d  rob_count=%0d",
                      rob_committed, rob_committed_rw, u_dut.rob_count);
+            $display("[TB] rn_stall_cycles=%0d  rn_free_count(end)=%0d",
+                     c_rn_stall, u_dut.rn_free_count);
             // M3.3 sanity（弱）：commit 计数不应超过 retired（不能 over-commit）
             if (rob_committed_rw > instrs_retired) begin
                 $display("[TB][ERROR] over-commit: rob_committed_rw=%0d > instrs_retired=%0d",

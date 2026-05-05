@@ -996,17 +996,70 @@ module cpu_top (
     assign dbg_wb_rd    = wb_rd;
     assign dbg_wb_data  = wb_data;
 
+    // ===== Milestone 3 Phase M3.4a: Register Rename (observability only) =====
+    // rename 与 ROB 同步，但流水线不消费其输出（regfile/forwarding 仍走旧路径）。
+
+    // Forward decls (实例化在文件末尾的 ROB 输出，rename 在此使用)
+    wire        rob_commit_valid_0, rob_commit_valid_1;
+    wire [4:0]  rob_commit_rd_0,    rob_commit_rd_1;
+    wire        rob_commit_rw_0,    rob_commit_rw_1;
+    // ROB ptag 接口（commit 时回收 old ptag 给 rename）
+    wire [5:0] rob_commit_ptag_new_0, rob_commit_ptag_old_0;
+    wire [5:0] rob_commit_ptag_new_1, rob_commit_ptag_old_1;
+
+    wire [5:0]  rn_s0_rs1_ptag, rn_s0_rs2_ptag;
+    wire [5:0]  rn_s0_rd_ptag_new, rn_s0_rd_ptag_old;
+    wire [5:0]  rn_s1_rs1_ptag, rn_s1_rs2_ptag;
+    wire [5:0]  rn_s1_rd_ptag_new, rn_s1_rd_ptag_old;
+    wire        rn_stall;
+    wire [4:0]  rn_free_count;
+    wire [47:0] rn_busy_vec;
+
+    wire        rn_s0_alloc = ifq_pop_slot0 && id_reg_write && (id_rd != 5'd0);
+    wire        rn_s1_alloc = ifq_pop_slot1 && id1_reg_write && (id1_rd != 5'd0);
+
+    rename u_rename (
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .flush              (ex_redirect),
+        .s0_rs1             (id_rs1),
+        .s0_rs2             (id_rs2),
+        .s0_rd              (id_rd),
+        .s0_alloc           (rn_s0_alloc),
+        .s1_rs1             (id1_rs1),
+        .s1_rs2             (id1_rs2),
+        .s1_rd              (id1_rd),
+        .s1_alloc           (rn_s1_alloc),
+        .s0_rs1_ptag        (rn_s0_rs1_ptag),
+        .s0_rs2_ptag        (rn_s0_rs2_ptag),
+        .s0_rd_ptag_new     (rn_s0_rd_ptag_new),
+        .s0_rd_ptag_old     (rn_s0_rd_ptag_old),
+        .s1_rs1_ptag        (rn_s1_rs1_ptag),
+        .s1_rs2_ptag        (rn_s1_rs2_ptag),
+        .s1_rd_ptag_new     (rn_s1_rd_ptag_new),
+        .s1_rd_ptag_old     (rn_s1_rd_ptag_old),
+        .stall              (rn_stall),
+        // M3.4a: wb 端口暂不接（ptag 还未流过流水线，busy 不被消费）。
+        .wb0_valid          (1'b0),
+        .wb0_ptag           (6'b0),
+        .wb1_valid          (1'b0),
+        .wb1_ptag           (6'b0),
+        .commit0_valid      (rob_commit_valid_0 && rob_commit_rw_0 && rob_commit_rd_0 != 5'd0),
+        .commit0_ptag_old   (rob_commit_ptag_old_0),
+        .commit1_valid      (rob_commit_valid_1 && rob_commit_rw_1 && rob_commit_rd_1 != 5'd0),
+        .commit1_ptag_old   (rob_commit_ptag_old_1),
+        .free_count         (rn_free_count),
+        .busy_vec           (rn_busy_vec)
+    );
+
     // ===== Milestone 3 Phase M3.2: ROB shadow tracking (alloc + wb + commit观测) =====
     // ROB 仍然不驱动 regfile（旧路径仍生效）；ROB 跟踪 in-flight 状态。
     wire [4:0]  rob_count;
     wire        rob_full, rob_almost_full;
 
-    // commit 视图（M3.2 中仅观测）
-    wire        rob_commit_valid_0, rob_commit_valid_1;
+    // commit 视图（M3.2 中仅观测；rob_commit_valid/rd/rw 已在 rename 段 forward-decl）
     wire [3:0]  rob_commit_tag_0, rob_commit_tag_1;
     wire [31:0] rob_commit_pc_0, rob_commit_pc_1;
-    wire [4:0]  rob_commit_rd_0, rob_commit_rd_1;
-    wire        rob_commit_rw_0, rob_commit_rw_1;
     wire [31:0] rob_commit_res_0, rob_commit_res_1;
     wire        rob_commit_st_0, rob_commit_st_1;
     wire [31:0] rob_commit_sa_0, rob_commit_sa_1;
@@ -1052,6 +1105,8 @@ module cpu_top (
         .alloc_reg_write_0  (rob_alloc_rw_0_w),
         .alloc_is_store_0   (rob_alloc_st_0_w),
         .alloc_is_branch_0  (rob_alloc_br_0_w),
+        .alloc_ptag_new_0   (rn_s0_rd_ptag_new),
+        .alloc_ptag_old_0   (rn_s0_rd_ptag_old),
         .alloc_tag_0        (rob_alloc_tag_0),
         .alloc_valid_1      (rob_alloc_v1),
         .alloc_pc_1         (rob_alloc_pc_1_w),
@@ -1059,6 +1114,8 @@ module cpu_top (
         .alloc_reg_write_1  (rob_alloc_rw_1_w),
         .alloc_is_store_1   (rob_alloc_st_1_w),
         .alloc_is_branch_1  (rob_alloc_br_1_w),
+        .alloc_ptag_new_1   (rn_s1_rd_ptag_new),
+        .alloc_ptag_old_1   (rn_s1_rd_ptag_old),
         .alloc_tag_1        (rob_alloc_tag_1),
         .full               (rob_full),
         .almost_full        (rob_almost_full),
@@ -1084,6 +1141,8 @@ module cpu_top (
         .commit_rd_0        (rob_commit_rd_0),
         .commit_reg_write_0 (rob_commit_rw_0),
         .commit_result_0    (rob_commit_res_0),
+        .commit_ptag_new_0  (rob_commit_ptag_new_0),
+        .commit_ptag_old_0  (rob_commit_ptag_old_0),
         .commit_is_store_0  (rob_commit_st_0),
         .commit_store_addr_0(rob_commit_sa_0),
         .commit_store_data_0(rob_commit_sd_0),
@@ -1096,6 +1155,8 @@ module cpu_top (
         .commit_rd_1        (rob_commit_rd_1),
         .commit_reg_write_1 (rob_commit_rw_1),
         .commit_result_1    (rob_commit_res_1),
+        .commit_ptag_new_1  (rob_commit_ptag_new_1),
+        .commit_ptag_old_1  (rob_commit_ptag_old_1),
         .commit_is_store_1  (rob_commit_st_1),
         .commit_store_addr_1(rob_commit_sa_1),
         .commit_store_data_1(rob_commit_sd_1),

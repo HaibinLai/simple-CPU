@@ -32,7 +32,8 @@
 
 module rob #(
     parameter DEPTH = 16,
-    parameter AW    = 4
+    parameter AW    = 4,
+    parameter PTAG_W = 6
 ) (
     input  wire                 clk,
     input  wire                 rst_n,
@@ -49,6 +50,8 @@ module rob #(
     input  wire                 alloc_reg_write_0,
     input  wire                 alloc_is_store_0,
     input  wire                 alloc_is_branch_0,
+    input  wire [PTAG_W-1:0]    alloc_ptag_new_0,
+    input  wire [PTAG_W-1:0]    alloc_ptag_old_0,
     output wire [AW-1:0]        alloc_tag_0,
 
     input  wire                 alloc_valid_1,
@@ -57,6 +60,8 @@ module rob #(
     input  wire                 alloc_reg_write_1,
     input  wire                 alloc_is_store_1,
     input  wire                 alloc_is_branch_1,
+    input  wire [PTAG_W-1:0]    alloc_ptag_new_1,
+    input  wire [PTAG_W-1:0]    alloc_ptag_old_1,
     output wire [AW-1:0]        alloc_tag_1,
 
     output wire                 full,
@@ -89,6 +94,8 @@ module rob #(
     output wire [4:0]           commit_rd_0,
     output wire                 commit_reg_write_0,
     output wire [31:0]          commit_result_0,
+    output wire [PTAG_W-1:0]    commit_ptag_new_0,
+    output wire [PTAG_W-1:0]    commit_ptag_old_0,
     output wire                 commit_is_store_0,
     output wire [31:0]          commit_store_addr_0,
     output wire [31:0]          commit_store_data_0,
@@ -102,6 +109,8 @@ module rob #(
     output wire [4:0]           commit_rd_1,
     output wire                 commit_reg_write_1,
     output wire [31:0]          commit_result_1,
+    output wire [PTAG_W-1:0]    commit_ptag_new_1,
+    output wire [PTAG_W-1:0]    commit_ptag_old_1,
     output wire                 commit_is_store_1,
     output wire [31:0]          commit_store_addr_1,
     output wire [31:0]          commit_store_data_1,
@@ -130,6 +139,8 @@ module rob #(
     reg                  exc_q       [0:DEPTH-1];
     reg [31:0]           cause_q     [0:DEPTH-1];
     reg                  is_branch_q [0:DEPTH-1];
+    reg [PTAG_W-1:0]     ptag_new_q  [0:DEPTH-1];
+    reg [PTAG_W-1:0]     ptag_old_q  [0:DEPTH-1];
 
     // ---- Pointers ----
     reg [AW-1:0]         head_ptr;
@@ -167,6 +178,8 @@ module rob #(
     assign commit_store_be_0    = sbe_q[head_idx_0];
     assign commit_exception_0   = exc_q[head_idx_0];
     assign commit_exc_cause_0   = cause_q[head_idx_0];
+    assign commit_ptag_new_0    = ptag_new_q[head_idx_0];
+    assign commit_ptag_old_0    = ptag_old_q[head_idx_0];
 
     assign commit_valid_1       = valid_q[head_idx_1] && done_q[head_idx_1] &&
                                    commit_valid_0 && (cnt >= 2);
@@ -181,6 +194,8 @@ module rob #(
     assign commit_store_be_1    = sbe_q[head_idx_1];
     assign commit_exception_1   = exc_q[head_idx_1];
     assign commit_exc_cause_1   = cause_q[head_idx_1];
+    assign commit_ptag_new_1    = ptag_new_q[head_idx_1];
+    assign commit_ptag_old_1    = ptag_old_q[head_idx_1];
 
     wire [1:0] do_pop = flush ? 2'd0 : commit_pop_count;
     wire do_pop_0 = (do_pop >= 2'd1);
@@ -207,6 +222,8 @@ module rob #(
                 exc_q[i]       <= 1'b0;
                 cause_q[i]     <= 32'b0;
                 is_branch_q[i] <= 1'b0;
+                ptag_new_q[i]  <= {PTAG_W{1'b0}};
+                ptag_old_q[i]  <= {PTAG_W{1'b0}};
             end
         end else if (flush) begin
             head_ptr <= {AW{1'b0}};
@@ -237,6 +254,8 @@ module rob #(
                 is_store_q[tail_ptr]   <= alloc_is_store_0;
                 is_branch_q[tail_ptr]  <= alloc_is_branch_0;
                 exc_q[tail_ptr]        <= 1'b0;
+                ptag_new_q[tail_ptr]   <= alloc_ptag_new_0;
+                ptag_old_q[tail_ptr]   <= alloc_ptag_old_0;
             end
             if (do_alloc_1) begin
                 valid_q[tail_ptr + 1'b1]      <= 1'b1;
@@ -247,6 +266,8 @@ module rob #(
                 is_store_q[tail_ptr + 1'b1]   <= alloc_is_store_1;
                 is_branch_q[tail_ptr + 1'b1]  <= alloc_is_branch_1;
                 exc_q[tail_ptr + 1'b1]        <= 1'b0;
+                ptag_new_q[tail_ptr + 1'b1]   <= alloc_ptag_new_1;
+                ptag_old_q[tail_ptr + 1'b1]   <= alloc_ptag_old_1;
             end
 
             // ---- Writeback ----
