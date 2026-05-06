@@ -436,6 +436,18 @@ module cpu_top (
     wire        prf_we0, prf_we1;
     wire [5:0]  prf_wa0, prf_wa1;
     wire [31:0] prf_wd0, prf_wd1;
+    // M3.4d: commit-time arch writes
+    wire        prf_we2, prf_we3;
+    wire [5:0]  prf_wa2, prf_wa3;
+    wire [31:0] prf_wd2, prf_wd3;
+    // M3.4d forward-decl: ROB commit results consumed by PRF[arch] writes
+    // (真正实例化在文件末尾 u_rob)
+    wire [31:0] rob_commit_res_0, rob_commit_res_1;
+    wire        rob_commit_valid_0, rob_commit_valid_1;
+    wire [4:0]  rob_commit_rd_0,    rob_commit_rd_1;
+    wire        rob_commit_rw_0,    rob_commit_rw_1;
+    wire [5:0]  rob_commit_ptag_new_0, rob_commit_ptag_old_0;
+    wire [5:0]  rob_commit_ptag_new_1, rob_commit_ptag_old_1;
     wire [31:0] prf_r0, prf_r1, prf_r2, prf_r3;
     // M3.4c PRF read addresses (sourced from EX-stage rs ptag pipeline regs)
     wire [5:0]  prf_ra0, prf_ra1, prf_ra2, prf_ra3;
@@ -473,6 +485,12 @@ module cpu_top (
         .we1      (prf_we1),
         .wa1      (prf_wa1),
         .wd1      (prf_wd1),
+        .we2      (prf_we2),
+        .wa2      (prf_wa2),
+        .wd2      (prf_wd2),
+        .we3      (prf_we3),
+        .wa3      (prf_wa3),
+        .wd3      (prf_wd3),
         .ra0      (prf_ra0),
         .ra1      (prf_ra1),
         .ra2      (prf_ra2),
@@ -1066,6 +1084,15 @@ module cpu_top (
     assign prf_ra2 = id1_ex_rs1_ptag;
     assign prf_ra3 = id1_ex_rs2_ptag;
 
+    // M3.4d: commit 端把架构寄存器值写入 PRF[arch_idx]，使 PRF[0..31] 始终
+    // 反映 commit 后的架构状态（ptag 0..31 为 arch 槽）。
+    assign prf_we2 = rob_commit_valid_0 && rob_commit_rw_0 && (rob_commit_rd_0 != 5'd0);
+    assign prf_wa2 = {1'b0, rob_commit_rd_0};
+    assign prf_wd2 = rob_commit_res_0;
+    assign prf_we3 = rob_commit_valid_1 && rob_commit_rw_1 && (rob_commit_rd_1 != 5'd0);
+    assign prf_wa3 = {1'b0, rob_commit_rd_1};
+    assign prf_wd3 = rob_commit_res_1;
+
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
     assign dbg_instr_wb = mem_wb_instr;
@@ -1077,13 +1104,7 @@ module cpu_top (
     // rename 与 ROB 同步，但流水线不消费其输出（regfile/forwarding 仍走旧路径）。
 
     // Forward decls (实例化在文件末尾的 ROB 输出，rename 在此使用)
-    wire        rob_commit_valid_0, rob_commit_valid_1;
-    wire [4:0]  rob_commit_rd_0,    rob_commit_rd_1;
-    wire        rob_commit_rw_0,    rob_commit_rw_1;
-    // ROB ptag 接口（commit 时回收 old ptag 给 rename）
-    wire [5:0] rob_commit_ptag_new_0, rob_commit_ptag_old_0;
-    wire [5:0] rob_commit_ptag_new_1, rob_commit_ptag_old_1;
-
+    // (M3.4d 已把 rob_commit_valid/rd/rw/ptag_new/ptag_old 上提到 PRF 段)
     wire [5:0]  rn_s0_rd_ptag_old;
     wire [5:0]  rn_s1_rd_ptag_old;
     wire        rn_stall;
@@ -1135,7 +1156,6 @@ module cpu_top (
     // commit 视图（M3.2 中仅观测；rob_commit_valid/rd/rw 已在 rename 段 forward-decl）
     wire [3:0]  rob_commit_tag_0, rob_commit_tag_1;
     wire [31:0] rob_commit_pc_0, rob_commit_pc_1;
-    wire [31:0] rob_commit_res_0, rob_commit_res_1;
     wire        rob_commit_st_0, rob_commit_st_1;
     wire [31:0] rob_commit_sa_0, rob_commit_sa_1;
     wire [31:0] rob_commit_sd_0, rob_commit_sd_1;

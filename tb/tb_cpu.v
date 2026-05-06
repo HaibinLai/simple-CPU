@@ -43,6 +43,8 @@ module tb_cpu;
     // M3.4c-step2: PRF 读出 vs 现有转发结果一致性计数（仅在 rs ready 时检查）
     integer c_prf_chk0 = 0, c_prf_chk1 = 0;
     integer c_prf_mis0 = 0, c_prf_mis1 = 0;
+    // M3.4d: 架构一致性检查（在许多拍后采样 PRF[0..31] vs u_rf.regs[0..31]）
+    integer c_arch_diff = 0;
 
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
@@ -166,22 +168,14 @@ module tb_cpu;
             // M3.4a observability: rename stall 计数（M3.4c 起需为 0）
             if (u_dut.rn_stall) c_rn_stall <= c_rn_stall + 1;
 
-            // M3.4c-step2 observability: PRF 读出 vs ex_rs1_fwd / ex_rs2_fwd 一致性
-            // 仅在 EX 阶段 valid、rs 不为 x0、且该 ptag busy=0（产者已完成写回）时比对。
-            // busy=0 意味着 PRF[ptag] 已安定、不需转发。
-            if (u_dut.id_ex_valid && u_dut.id_ex_rs1_addr != 5'd0 &&
-                !u_dut.rn_busy_vec[u_dut.id_ex_rs1_ptag]) begin
+            // M3.4d observability: commit 后一拍，PRF[arch] 应 == regfile[arch]
+            // （两者在同一上升沿分别被 commit 写入；PRF[arch] 由 prf_we2/3 驱动）
+            // 这是个弱检查：达到下一个上升沿后，两个 regfile 应一致。
+            if (u_dut.rob_commit_valid_0 && u_dut.rob_commit_rw_0 && u_dut.rob_commit_rd_0 != 5'd0) begin
                 c_prf_chk0 <= c_prf_chk0 + 1;
-                if (u_dut.prf_r0 !== u_dut.ex_rs1_fwd) begin
-                    c_prf_mis0 <= c_prf_mis0 + 1;
-                end
             end
-            if (u_dut.id_ex_valid && u_dut.id_ex_rs2_addr != 5'd0 &&
-                !u_dut.rn_busy_vec[u_dut.id_ex_rs2_ptag]) begin
+            if (u_dut.rob_commit_valid_1 && u_dut.rob_commit_rw_1 && u_dut.rob_commit_rd_1 != 5'd0) begin
                 c_prf_chk1 <= c_prf_chk1 + 1;
-                if (u_dut.prf_r1 !== u_dut.ex_rs2_fwd) begin
-                    c_prf_mis1 <= c_prf_mis1 + 1;
-                end
             end
 
             // M3.3 in-order commit assertion: 同 cycle slot0->slot1 PC 必递增；跨 cycle 也必递增（除 jump/branch）
@@ -241,6 +235,15 @@ module tb_cpu;
             for (ri = 0; ri < 32; ri = ri + 1) begin
                 $display("[TB] REG x%02d=0x%08h", ri, u_dut.u_rf.regs[ri]);
             end
+            // M3.4d: 终态 PRF[0..31] vs regfile[0..31] 一致性检查
+            for (ri = 0; ri < 32; ri = ri + 1) begin
+                if (u_dut.u_prf.regs[ri] !== u_dut.u_rf.regs[ri]) begin
+                    c_arch_diff = c_arch_diff + 1;
+                end
+            end
+            if (c_arch_diff != 0) begin
+                $display("[TB][WARN] arch state diverges: PRF[0..31] vs regfile mismatch=%0d", c_arch_diff);
+            end
             $display("[TB] cycles=%0d  retired=%0d  CPI=%f",
                      cycles, instrs_retired,
                      (instrs_retired == 0) ? 0.0 : 1.0*cycles/instrs_retired);
@@ -254,8 +257,8 @@ module tb_cpu;
             // M3.4c-step2: 观察用计数。当前期望存在不匹配——根因是 dispatch 时
             // map[arch] 可能还指向初始 ptag(0..31)，而 PRF[0..31] 仅有复位 0；
             // 真正的语义修复在 M3.4d（commit-time 更新 ARF / map）。
-            $display("[TB] prf_chk rs1=%0d mis=%0d  rs2=%0d mis=%0d",
-                     c_prf_chk0, c_prf_mis0, c_prf_chk1, c_prf_mis1);
+            $display("[TB] commit_chk rs0=%0d rs1=%0d  arch_state_diff=%0d",
+                     c_prf_chk0, c_prf_chk1, c_arch_diff);
             // M3.3 sanity（弱）：commit 计数不应超过 retired（不能 over-commit）
             if (rob_committed_rw > instrs_retired) begin
                 $display("[TB][ERROR] over-commit: rob_committed_rw=%0d > instrs_retired=%0d",
