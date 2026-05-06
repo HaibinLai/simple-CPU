@@ -120,9 +120,12 @@ module rename #(
             fl_tail <= 5'd0;
             fl_cnt  <= SPEC_CNT[4:0];
         end else if (flush) begin
-            // M3.4f: flush 将 spec map 复位为架构状态 (RRAT)
+            // M3.4f: 完整 flush 路径暂用 identity 恢复（与 free_list = {32..47} 一致，
+            // 避免 spec ptag 既被 arch_map 占用又出现在 free_list 的双重分配问题）。
+            // PRF[arch_idx] 已由 commit 写入（M3.4d-step1），读 PRF[i] 即拿到架构态。
+            // arch_map 保留以便后续 partial flush 使用（需要更精细的 free 重建）。
             for (i = 0; i < 32; i = i + 1)
-                map[i] <= arch_map[i];
+                map[i] <= i[PTAG_W-1:0];
             busy <= {PRF_SIZE{1'b0}};
             for (i = 0; i < SPEC_CNT; i = i + 1)
                 fl_mem[i] <= (SPEC_BASE + i);
