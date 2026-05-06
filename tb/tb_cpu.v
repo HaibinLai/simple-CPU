@@ -50,6 +50,11 @@ module tb_cpu;
     integer c_flush_bad_free = 0;  // flush 后下一拍 free_count != 16
     integer c_flush_bad_busy = 0;  // flush 后下一拍 busy_vec != 0
     reg     prev_flush       = 1'b0;
+    // M3.5: 推测写回不变骏：每个 WB 都应有 valid 的 ROB 项
+    integer c_wb0_total       = 0;
+    integer c_wb0_orphan      = 0;  // mem_wb 有效但 ROB[tag] 不 valid
+    integer c_wb1_total       = 0;
+    integer c_wb1_orphan      = 0;  // slot1 EX1 wb 有效但 ROB[tag] 不 valid
 
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
@@ -177,6 +182,21 @@ module tb_cpu;
             //   复位：free_count == 16, busy == 0, map = identity。
             prev_flush <= u_dut.ex_redirect;
             if (u_dut.ex_redirect) c_flushes <= c_flushes + 1;
+
+            // M3.5: orphan-WB 检查。WB 会带一个 rob_tag；ROB[tag].valid 必须为 1。
+            // 如果不为 1，代表有 "孤儿 WB"：其 ROB 项已被 flush 清除。
+            if (u_dut.mem_wb_valid) begin
+                c_wb0_total <= c_wb0_total + 1;
+                if (!u_dut.u_rob.valid_q[u_dut.mem_wb_rob_tag]) begin
+                    c_wb0_orphan <= c_wb0_orphan + 1;
+                end
+            end
+            if (u_dut.id1_ex_valid && u_dut.slot1_wb_we) begin
+                c_wb1_total <= c_wb1_total + 1;
+                if (!u_dut.u_rob.valid_q[u_dut.id1_ex_rob_tag]) begin
+                    c_wb1_orphan <= c_wb1_orphan + 1;
+                end
+            end
             if (prev_flush) begin
                 if (u_dut.rn_free_count != 5'd16) begin
                     c_flush_bad_free <= c_flush_bad_free + 1;
@@ -285,6 +305,11 @@ module tb_cpu;
                      c_prf_chk0, c_prf_chk1, c_arch_diff);
             $display("[TB] flushes=%0d  bad_free_after=%0d  bad_busy_after=%0d",
                      c_flushes, c_flush_bad_free, c_flush_bad_busy);
+            $display("[TB] wb_orph slot0=%0d/%0d  slot1=%0d/%0d",
+                     c_wb0_orphan, c_wb0_total, c_wb1_orphan, c_wb1_total);
+            // 注：当前 ROB.flush 一次清光所有条目（包括 mispredict 之前的老指令），
+            // 老指令到 WB 时它的 ROB 项已被清 → orphan WB。这不影响 program correctness
+            // (regfile 仍是权威)。M3.5-step2 将引入 partial flush 修复此问题。
             if (c_flush_bad_free != 0 || c_flush_bad_busy != 0) begin
                 $display("[TB][ERROR] rename flush invariant violated");
             end
