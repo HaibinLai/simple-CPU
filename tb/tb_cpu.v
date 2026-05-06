@@ -45,6 +45,11 @@ module tb_cpu;
     integer c_prf_mis0 = 0, c_prf_mis1 = 0;
     // M3.4d: 架构一致性检查（在许多拍后采样 PRF[0..31] vs u_rf.regs[0..31]）
     integer c_arch_diff = 0;
+    // M3.4e: flush 后 rename 状态不变骏检查
+    integer c_flushes        = 0;
+    integer c_flush_bad_free = 0;  // flush 后下一拍 free_count != 16
+    integer c_flush_bad_busy = 0;  // flush 后下一拍 busy_vec != 0
+    reg     prev_flush       = 1'b0;
 
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
@@ -168,6 +173,25 @@ module tb_cpu;
             // M3.4a observability: rename stall 计数（M3.4c 起需为 0）
             if (u_dut.rn_stall) c_rn_stall <= c_rn_stall + 1;
 
+            // M3.4e: flush 不变骏。flush 拉高后，下一个上升沿 rename 需
+            //   复位：free_count == 16, busy == 0, map = identity。
+            prev_flush <= u_dut.ex_redirect;
+            if (u_dut.ex_redirect) c_flushes <= c_flushes + 1;
+            if (prev_flush) begin
+                if (u_dut.rn_free_count != 5'd16) begin
+                    c_flush_bad_free <= c_flush_bad_free + 1;
+                    if (c_flush_bad_free < 3)
+                        $display("[TB][FLUSH] cyc=%0d free_count=%0d (expected 16)",
+                                 cycles, u_dut.rn_free_count);
+                end
+                if (u_dut.rn_busy_vec != 48'b0) begin
+                    c_flush_bad_busy <= c_flush_bad_busy + 1;
+                    if (c_flush_bad_busy < 3)
+                        $display("[TB][FLUSH] cyc=%0d busy_vec=0x%012h (expected 0)",
+                                 cycles, u_dut.rn_busy_vec);
+                end
+            end
+
             // M3.4d observability: commit 后一拍，PRF[arch] 应 == regfile[arch]
             // （两者在同一上升沿分别被 commit 写入；PRF[arch] 由 prf_we2/3 驱动）
             // 这是个弱检查：达到下一个上升沿后，两个 regfile 应一致。
@@ -259,6 +283,11 @@ module tb_cpu;
             // 真正的语义修复在 M3.4d（commit-time 更新 ARF / map）。
             $display("[TB] commit_chk rs0=%0d rs1=%0d  arch_state_diff=%0d",
                      c_prf_chk0, c_prf_chk1, c_arch_diff);
+            $display("[TB] flushes=%0d  bad_free_after=%0d  bad_busy_after=%0d",
+                     c_flushes, c_flush_bad_free, c_flush_bad_busy);
+            if (c_flush_bad_free != 0 || c_flush_bad_busy != 0) begin
+                $display("[TB][ERROR] rename flush invariant violated");
+            end
             // M3.3 sanity（弱）：commit 计数不应超过 retired（不能 over-commit）
             if (rob_committed_rw > instrs_retired) begin
                 $display("[TB][ERROR] over-commit: rob_committed_rw=%0d > instrs_retired=%0d",
