@@ -424,6 +424,9 @@ module cpu_top (
     wire [5:0]  rn_s1_rs1_ptag, rn_s1_rs2_ptag;
     wire [5:0]  rn_s0_rd_ptag_new;
     wire [5:0]  rn_s1_rd_ptag_new;
+    // M3.4c: rs ptag pipeline regs forward-decl
+    // (实际声明在流水线寄存器部分，这里提前使 PRF 能引用)
+    // 注意：Icarus 在同一 module 内允许 "declare-after-use"仅限 net；reg 需要提前声明。
     
     // Slot1 write ports (Milestone 2, not yet enabled)
     wire        slot1_wb_we;
@@ -434,6 +437,8 @@ module cpu_top (
     wire [5:0]  prf_wa0, prf_wa1;
     wire [31:0] prf_wd0, prf_wd1;
     wire [31:0] prf_r0, prf_r1, prf_r2, prf_r3;
+    // M3.4c PRF read addresses (sourced from EX-stage rs ptag pipeline regs)
+    wire [5:0]  prf_ra0, prf_ra1, prf_ra2, prf_ra3;
     
     regfile u_rf (
         .clk      (clk),
@@ -468,10 +473,10 @@ module cpu_top (
         .we1      (prf_we1),
         .wa1      (prf_wa1),
         .wd1      (prf_wd1),
-        .ra0      (rn_s0_rs1_ptag),
-        .ra1      (rn_s0_rs2_ptag),
-        .ra2      (rn_s1_rs1_ptag),
-        .ra3      (rn_s1_rs2_ptag),
+        .ra0      (prf_ra0),
+        .ra1      (prf_ra1),
+        .ra2      (prf_ra2),
+        .ra3      (prf_ra3),
         .rd0      (prf_r0),
         .rd1      (prf_r1),
         .rd2      (prf_r2),
@@ -493,6 +498,7 @@ module cpu_top (
     reg [2:0]  id1_ex_imm_type;
     reg [3:0]  id1_ex_rob_tag;
     reg [5:0]  id1_ex_rd_ptag;
+    reg [5:0]  id1_ex_rs1_ptag, id1_ex_rs2_ptag;
 
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
@@ -514,6 +520,7 @@ module cpu_top (
     reg [31:0] id_ex_pred_target;
     reg [3:0]  id_ex_rob_tag;
     reg [5:0]  id_ex_rd_ptag;
+    reg [5:0]  id_ex_rs1_ptag, id_ex_rs2_ptag;
 
     // 冒险检测（load-use）
     hazard u_hazard (
@@ -582,6 +589,8 @@ module cpu_top (
             id1_ex_valid      <= 1'b0;
             id1_ex_imm_type   <= `IMM_NONE;
             id1_ex_rd_ptag    <= 6'b0;
+            id1_ex_rs1_ptag   <= 6'b0;
+            id1_ex_rs2_ptag   <= 6'b0;
         end else if (ex_redirect || stall) begin
             // 刷新/气泡 slot1
             id1_ex_instr      <= 32'h00000013;
@@ -606,6 +615,8 @@ module cpu_top (
             id1_ex_imm_type   <= id1_imm_type;
             id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
             id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
+            id1_ex_rs1_ptag   <= rn_s1_rs1_ptag;       // M3.4c: 携带 rs ptag
+            id1_ex_rs2_ptag   <= rn_s1_rs2_ptag;
         end
     end
 
@@ -636,6 +647,8 @@ module cpu_top (
             id_ex_pred_taken <= 1'b0;
             id_ex_pred_target<= 32'b0;
             id_ex_rd_ptag    <= 6'b0;
+            id_ex_rs1_ptag   <= 6'b0;
+            id_ex_rs2_ptag   <= 6'b0;
         end else if (ex_redirect || stall) begin
             // 刷新/气泡 ID/EX：清控制信号
             id_ex_instr       <= 32'h00000013;
@@ -678,6 +691,8 @@ module cpu_top (
             id_ex_pred_target <= id1_id2_pred_target;
             id_ex_rob_tag     <= rob_alloc_tag_0;     // M3.2: 携带 ROB tag
             id_ex_rd_ptag     <= rn_s0_rd_ptag_new;   // M3.4b: 携带 rename ptag
+            id_ex_rs1_ptag    <= rn_s0_rs1_ptag;       // M3.4c: 携带 rs ptag
+            id_ex_rs2_ptag    <= rn_s0_rs2_ptag;
         end
     end
 
@@ -1045,6 +1060,11 @@ module cpu_top (
     assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
     assign prf_wa1 = id1_ex_rd_ptag;
     assign prf_wd1 = slot1_wb_data;
+    // M3.4c: PRF 读地址由 EX 阶段的 rs ptag 驱动
+    assign prf_ra0 = id_ex_rs1_ptag;
+    assign prf_ra1 = id_ex_rs2_ptag;
+    assign prf_ra2 = id1_ex_rs1_ptag;
+    assign prf_ra3 = id1_ex_rs2_ptag;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
