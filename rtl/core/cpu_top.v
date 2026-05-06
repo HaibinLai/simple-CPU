@@ -44,6 +44,7 @@ module cpu_top (
     reg [1:0]  ex_mem_wb_sel;
     reg        ex_mem_valid;
     reg [3:0]  ex_mem_rob_tag;
+    reg [5:0]  ex_mem_rd_ptag;
 
     // EX2/AGU
     reg [31:0] ex2_agu_pc;
@@ -57,6 +58,7 @@ module cpu_top (
     reg [1:0]  ex2_agu_wb_sel;
     reg        ex2_agu_valid;
     reg [3:0]  ex2_agu_rob_tag;
+    reg [5:0]  ex2_agu_rd_ptag;
 
     // AGU/MEM
     reg [31:0] agu_mem_pc;
@@ -70,6 +72,7 @@ module cpu_top (
     reg [1:0]  agu_mem_wb_sel;
     reg        agu_mem_valid;
     reg [3:0]  agu_mem_rob_tag;
+    reg [5:0]  agu_mem_rd_ptag;
     // MEM/WB
     reg [31:0] mem_wb_pc;
     reg [31:0] mem_wb_instr;
@@ -80,6 +83,7 @@ module cpu_top (
     reg [1:0]  mem_wb_wb_sel;
     reg        mem_wb_valid;
     reg [3:0]  mem_wb_rob_tag;
+    reg [5:0]  mem_wb_rd_ptag;
 
     // MEM 阶段 load 扩展结果（用于 WB，也可用于 EX 前递）
     reg [31:0] mem_load_data;
@@ -411,11 +415,25 @@ module cpu_top (
     
     // Slot1 read outputs (Milestone 2)
     wire [31:0] id1_rs1_data, id1_rs2_data;
+
+    // M3.2: ROB alloc tag forward decl（实例化在文件末尾）
+    wire [3:0]  rob_alloc_tag_0;
+    wire [3:0]  rob_alloc_tag_1;
+    // M3.4a/b: rename ptag forward decl（实例化在文件末尾）
+    wire [5:0]  rn_s0_rs1_ptag, rn_s0_rs2_ptag;
+    wire [5:0]  rn_s1_rs1_ptag, rn_s1_rs2_ptag;
+    wire [5:0]  rn_s0_rd_ptag_new;
+    wire [5:0]  rn_s1_rd_ptag_new;
     
     // Slot1 write ports (Milestone 2, not yet enabled)
     wire        slot1_wb_we;
     wire [4:0]  slot1_wb_rd;
     wire [31:0] slot1_wb_data;
+    // M3.4b PRF dual-write source
+    wire        prf_we0, prf_we1;
+    wire [5:0]  prf_wa0, prf_wa1;
+    wire [31:0] prf_wd0, prf_wd1;
+    wire [31:0] prf_r0, prf_r1, prf_r2, prf_r3;
     
     regfile u_rf (
         .clk      (clk),
@@ -440,10 +458,27 @@ module cpu_top (
         .rd1_data (slot1_wb_data)
     );
 
+    // M3.4b: 物理寄存器文件（当前仅写入，读口先做观测）
+    prf #(.DEPTH(48), .AW(6)) u_prf (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .we0      (prf_we0),
+        .wa0      (prf_wa0),
+        .wd0      (prf_wd0),
+        .we1      (prf_we1),
+        .wa1      (prf_wa1),
+        .wd1      (prf_wd1),
+        .ra0      (rn_s0_rs1_ptag),
+        .ra1      (rn_s0_rs2_ptag),
+        .ra2      (rn_s1_rs1_ptag),
+        .ra3      (rn_s1_rs2_ptag),
+        .rd0      (prf_r0),
+        .rd1      (prf_r1),
+        .rd2      (prf_r2),
+        .rd3      (prf_r3)
+    );
+
     // ===== Milestone 2: Slot1 ID/EX Pipeline Registers (Phase 2B) =====
-    // M3.2: ROB alloc tag forward decl（实例化在文件末尾）
-    wire [3:0]  rob_alloc_tag_0;
-    wire [3:0]  rob_alloc_tag_1;
 
     reg [31:0] id1_ex_pc;
     reg [31:0] id1_ex_instr;
@@ -457,6 +492,7 @@ module cpu_top (
     reg        id1_ex_valid;
     reg [2:0]  id1_ex_imm_type;
     reg [3:0]  id1_ex_rob_tag;
+    reg [5:0]  id1_ex_rd_ptag;
 
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
@@ -477,6 +513,7 @@ module cpu_top (
     reg        id_ex_pred_taken;
     reg [31:0] id_ex_pred_target;
     reg [3:0]  id_ex_rob_tag;
+    reg [5:0]  id_ex_rd_ptag;
 
     // 冒险检测（load-use）
     hazard u_hazard (
@@ -544,6 +581,7 @@ module cpu_top (
             id1_ex_wb_sel     <= `WB_ALU;
             id1_ex_valid      <= 1'b0;
             id1_ex_imm_type   <= `IMM_NONE;
+            id1_ex_rd_ptag    <= 6'b0;
         end else if (ex_redirect || stall) begin
             // 刷新/气泡 slot1
             id1_ex_instr      <= 32'h00000013;
@@ -567,6 +605,7 @@ module cpu_top (
             id1_ex_valid      <= id2_issue_slot1;     // 仅当 slot1 满足配对条件时，流水线才推进
             id1_ex_imm_type   <= id1_imm_type;
             id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
+            id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
         end
     end
 
@@ -596,6 +635,7 @@ module cpu_top (
             id_ex_is_illegal <= 1'b0;
             id_ex_pred_taken <= 1'b0;
             id_ex_pred_target<= 32'b0;
+            id_ex_rd_ptag    <= 6'b0;
         end else if (ex_redirect || stall) begin
             // 刷新/气泡 ID/EX：清控制信号
             id_ex_instr       <= 32'h00000013;
@@ -637,6 +677,7 @@ module cpu_top (
             id_ex_pred_taken  <= id1_id2_pred_taken;
             id_ex_pred_target <= id1_id2_pred_target;
             id_ex_rob_tag     <= rob_alloc_tag_0;     // M3.2: 携带 ROB tag
+            id_ex_rd_ptag     <= rn_s0_rd_ptag_new;   // M3.4b: 携带 rename ptag
         end
     end
 
@@ -798,6 +839,7 @@ module cpu_top (
             ex_mem_reg_write  <= 1'b0;
             ex_mem_wb_sel     <= `WB_ALU;
             ex_mem_valid      <= 1'b0;
+            ex_mem_rd_ptag    <= 6'b0;
         end else begin
             ex_mem_pc         <= id_ex_pc;
             ex_mem_instr      <= id_ex_instr;
@@ -812,6 +854,7 @@ module cpu_top (
             ex_mem_wb_sel     <= id_ex_wb_sel;
             ex_mem_valid      <= id_ex_valid;
             ex_mem_rob_tag    <= id_ex_rob_tag;
+            ex_mem_rd_ptag    <= id_ex_rd_ptag;
         end
     end
 
@@ -829,6 +872,7 @@ module cpu_top (
             ex2_agu_reg_write  <= 1'b0;
             ex2_agu_wb_sel     <= `WB_ALU;
             ex2_agu_valid      <= 1'b0;
+            ex2_agu_rd_ptag    <= 6'b0;
         end else begin
             ex2_agu_pc         <= ex_mem_pc;
             ex2_agu_instr      <= ex_mem_instr;
@@ -842,6 +886,7 @@ module cpu_top (
             ex2_agu_wb_sel     <= ex_mem_wb_sel;
             ex2_agu_valid      <= ex_mem_valid;
             ex2_agu_rob_tag    <= ex_mem_rob_tag;
+            ex2_agu_rd_ptag    <= ex_mem_rd_ptag;
         end
     end
 
@@ -859,6 +904,7 @@ module cpu_top (
             agu_mem_reg_write  <= 1'b0;
             agu_mem_wb_sel     <= `WB_ALU;
             agu_mem_valid      <= 1'b0;
+            agu_mem_rd_ptag    <= 6'b0;
         end else begin
             agu_mem_pc         <= ex2_agu_pc;
             agu_mem_instr      <= ex2_agu_instr;
@@ -872,6 +918,7 @@ module cpu_top (
             agu_mem_wb_sel     <= ex2_agu_wb_sel;
             agu_mem_valid      <= ex2_agu_valid;
             agu_mem_rob_tag    <= ex2_agu_rob_tag;
+            agu_mem_rd_ptag    <= ex2_agu_rd_ptag;
         end
     end
 
@@ -964,6 +1011,7 @@ module cpu_top (
             mem_wb_reg_write <= 1'b0;
             mem_wb_wb_sel    <= `WB_ALU;
             mem_wb_valid     <= 1'b0;
+            mem_wb_rd_ptag   <= 6'b0;
         end else begin
             mem_wb_pc        <= agu_mem_pc;
             mem_wb_instr     <= agu_mem_instr;
@@ -974,6 +1022,7 @@ module cpu_top (
             mem_wb_wb_sel    <= agu_mem_wb_sel;
             mem_wb_valid     <= agu_mem_valid;
             mem_wb_rob_tag   <= agu_mem_rob_tag;
+            mem_wb_rd_ptag   <= agu_mem_rd_ptag;
         end
     end
 
@@ -988,6 +1037,14 @@ module cpu_top (
     assign slot1_wb_we   = id1_ex_valid && id1_ex_reg_write;
     assign slot1_wb_rd   = id1_ex_rd;
     assign slot1_wb_data = slot1_alu_y;
+
+    // M3.4b: PRF 双写来源（保持旧 regfile 写回路径不变）
+    assign prf_we0 = wb_we && (mem_wb_rd != 5'd0);
+    assign prf_wa0 = mem_wb_rd_ptag;
+    assign prf_wd0 = wb_data;
+    assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
+    assign prf_wa1 = id1_ex_rd_ptag;
+    assign prf_wd1 = slot1_wb_data;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
@@ -1007,10 +1064,8 @@ module cpu_top (
     wire [5:0] rob_commit_ptag_new_0, rob_commit_ptag_old_0;
     wire [5:0] rob_commit_ptag_new_1, rob_commit_ptag_old_1;
 
-    wire [5:0]  rn_s0_rs1_ptag, rn_s0_rs2_ptag;
-    wire [5:0]  rn_s0_rd_ptag_new, rn_s0_rd_ptag_old;
-    wire [5:0]  rn_s1_rs1_ptag, rn_s1_rs2_ptag;
-    wire [5:0]  rn_s1_rd_ptag_new, rn_s1_rd_ptag_old;
+    wire [5:0]  rn_s0_rd_ptag_old;
+    wire [5:0]  rn_s1_rd_ptag_old;
     wire        rn_stall;
     wire [4:0]  rn_free_count;
     wire [47:0] rn_busy_vec;
@@ -1039,11 +1094,11 @@ module cpu_top (
         .s1_rd_ptag_new     (rn_s1_rd_ptag_new),
         .s1_rd_ptag_old     (rn_s1_rd_ptag_old),
         .stall              (rn_stall),
-        // M3.4a: wb 端口暂不接（ptag 还未流过流水线，busy 不被消费）。
-        .wb0_valid          (1'b0),
-        .wb0_ptag           (6'b0),
-        .wb1_valid          (1'b0),
-        .wb1_ptag           (6'b0),
+        // M3.4b: 用真实写回事件清 busy
+        .wb0_valid          (prf_we0),
+        .wb0_ptag           (mem_wb_rd_ptag),
+        .wb1_valid          (prf_we1),
+        .wb1_ptag           (id1_ex_rd_ptag),
         .commit0_valid      (rob_commit_valid_0 && rob_commit_rw_0 && rob_commit_rd_0 != 5'd0),
         .commit0_ptag_old   (rob_commit_ptag_old_0),
         .commit1_valid      (rob_commit_valid_1 && rob_commit_rw_1 && rob_commit_rd_1 != 5'd0),
