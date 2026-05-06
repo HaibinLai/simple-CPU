@@ -40,6 +40,13 @@ module rob #(
 
     // Flush all in-flight entries (e.g. mispredict / exception redirect)
     input  wire                 flush,
+    // M3.5-step2: partial flush — 仅清除 tag > flush_keep_tag 的条目
+    // （在环形 head..tail 顺序上）。flush_partial=1 时优先于 flush。
+    // flush_keep_valid 表示 flush_keep_tag 是否本身也被保留（为 0 时连同 keep_tag 也清除，
+    // 用于异常场景）。平常 mispredict 使用 flush_keep_valid=1。
+    input  wire                 flush_partial,
+    input  wire [AW-1:0]        flush_keep_tag,
+    input  wire                 flush_keep_valid,
 
     // ---- Allocate (dispatch) — up to 2 per cycle ----
     // alloc_valid_X must be 0 if no instruction is being dispatched.
@@ -200,6 +207,21 @@ module rob #(
     wire [1:0] do_pop = flush ? 2'd0 : commit_pop_count;
     wire do_pop_0 = (do_pop >= 2'd1);
     wire do_pop_1 = (do_pop >= 2'd2);
+
+    // M3.5-step2 (deferred): partial flush helpers kept for future use.
+    // Currently unused because rename.v full-flush is incompatible with
+    // partial ROB flush (free_list double-counting). Will be enabled when
+    // rename gains map snapshot / walk-back support.
+    wire [AW-1:0] partial_new_tail = flush_keep_tag + (flush_keep_valid ? 1'b1 : 1'b0);
+    function automatic [AW:0] age_of;
+        input [AW-1:0] tag;
+        input [AW-1:0] h;
+        begin
+            age_of = ({1'b0, tag} - {1'b0, h}) & {1'b0, {AW{1'b1}}};
+        end
+    endfunction
+    wire [AW:0] age_keep_excl = age_of(partial_new_tail, head_ptr);
+    wire _unused_partial = flush_partial | (|partial_new_tail) | (|age_keep_excl);
 
     // ---- Sequential update ----
     integer i;
