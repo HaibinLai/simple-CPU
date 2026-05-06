@@ -40,6 +40,9 @@ module tb_cpu;
     integer rob_committed = 0;      // M3.3: ROB commit ports 计数（含 x0/store/branch）
     integer rob_committed_rw = 0;   // M3.3: ROB commit 中 reg_write && rd!=x0 数（应 == instrs_retired）
     integer c_rn_stall = 0;         // M3.4a: rename stall 计数
+    // M3.4c-step2: PRF 读出 vs 现有转发结果一致性计数（仅在 rs ready 时检查）
+    integer c_prf_chk0 = 0, c_prf_chk1 = 0;
+    integer c_prf_mis0 = 0, c_prf_mis1 = 0;
 
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
@@ -163,6 +166,24 @@ module tb_cpu;
             // M3.4a observability: rename stall 计数（M3.4c 起需为 0）
             if (u_dut.rn_stall) c_rn_stall <= c_rn_stall + 1;
 
+            // M3.4c-step2 observability: PRF 读出 vs ex_rs1_fwd / ex_rs2_fwd 一致性
+            // 仅在 EX 阶段 valid、rs 不为 x0、且该 ptag busy=0（产者已完成写回）时比对。
+            // busy=0 意味着 PRF[ptag] 已安定、不需转发。
+            if (u_dut.id_ex_valid && u_dut.id_ex_rs1_addr != 5'd0 &&
+                !u_dut.rn_busy_vec[u_dut.id_ex_rs1_ptag]) begin
+                c_prf_chk0 <= c_prf_chk0 + 1;
+                if (u_dut.prf_r0 !== u_dut.ex_rs1_fwd) begin
+                    c_prf_mis0 <= c_prf_mis0 + 1;
+                end
+            end
+            if (u_dut.id_ex_valid && u_dut.id_ex_rs2_addr != 5'd0 &&
+                !u_dut.rn_busy_vec[u_dut.id_ex_rs2_ptag]) begin
+                c_prf_chk1 <= c_prf_chk1 + 1;
+                if (u_dut.prf_r1 !== u_dut.ex_rs2_fwd) begin
+                    c_prf_mis1 <= c_prf_mis1 + 1;
+                end
+            end
+
             // M3.3 in-order commit assertion: 同 cycle slot0->slot1 PC 必递增；跨 cycle 也必递增（除 jump/branch）
             // 注意：跳转 / 分支可使 PC 跳到任意位置，所以严格只检查 slot1.pc > slot0.pc 这种「同 cycle 双发射」的强约束
             if (u_dut.rob_commit_valid_0 && u_dut.rob_commit_valid_1) begin
@@ -230,6 +251,11 @@ module tb_cpu;
                      rob_committed, rob_committed_rw, u_dut.rob_count);
             $display("[TB] rn_stall_cycles=%0d  rn_free_count(end)=%0d",
                      c_rn_stall, u_dut.rn_free_count);
+            // M3.4c-step2: 观察用计数。当前期望存在不匹配——根因是 dispatch 时
+            // map[arch] 可能还指向初始 ptag(0..31)，而 PRF[0..31] 仅有复位 0；
+            // 真正的语义修复在 M3.4d（commit-time 更新 ARF / map）。
+            $display("[TB] prf_chk rs1=%0d mis=%0d  rs2=%0d mis=%0d",
+                     c_prf_chk0, c_prf_mis0, c_prf_chk1, c_prf_mis1);
             // M3.3 sanity（弱）：commit 计数不应超过 retired（不能 over-commit）
             if (rob_committed_rw > instrs_retired) begin
                 $display("[TB][ERROR] over-commit: rob_committed_rw=%0d > instrs_retired=%0d",
