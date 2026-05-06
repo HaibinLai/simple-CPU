@@ -1141,8 +1141,12 @@ module cpu_top (
         .wb1_valid          (prf_we1),
         .wb1_ptag           (id1_ex_rd_ptag),
         .commit0_valid      (rob_commit_valid_0 && rob_commit_rw_0 && rob_commit_rd_0 != 5'd0),
+        .commit0_rd         (rob_commit_rd_0),
+        .commit0_ptag_new   (rob_commit_ptag_new_0),
         .commit0_ptag_old   (rob_commit_ptag_old_0),
         .commit1_valid      (rob_commit_valid_1 && rob_commit_rw_1 && rob_commit_rd_1 != 5'd0),
+        .commit1_rd         (rob_commit_rd_1),
+        .commit1_ptag_new   (rob_commit_ptag_new_1),
         .commit1_ptag_old   (rob_commit_ptag_old_1),
         .free_count         (rn_free_count),
         .busy_vec           (rn_busy_vec)

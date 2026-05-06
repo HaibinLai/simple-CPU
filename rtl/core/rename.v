@@ -46,8 +46,12 @@ module rename #(
     input  wire [PTAG_W-1:0]      wb1_ptag,
 
     input  wire                   commit0_valid,
+    input  wire [4:0]             commit0_rd,
+    input  wire [PTAG_W-1:0]      commit0_ptag_new,
     input  wire [PTAG_W-1:0]      commit0_ptag_old,
     input  wire                   commit1_valid,
+    input  wire [4:0]             commit1_rd,
+    input  wire [PTAG_W-1:0]      commit1_ptag_new,
     input  wire [PTAG_W-1:0]      commit1_ptag_old,
 
     output wire [4:0]             free_count,
@@ -55,6 +59,9 @@ module rename #(
 );
 
     reg [PTAG_W-1:0]   map [0:31];
+    // M3.4f: RRAT — 架构重命名表，仅在 commit 时更新。
+    // 在 mispredict/flush 后，map <= arch_map 可以恢复到架构状态。
+    reg [PTAG_W-1:0]   arch_map [0:31];
     reg [PRF_SIZE-1:0] busy;
     assign busy_vec = busy;
 
@@ -102,8 +109,10 @@ module rename #(
     integer i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (i = 0; i < 32; i = i + 1)
-                map[i] <= i[PTAG_W-1:0];
+            for (i = 0; i < 32; i = i + 1) begin
+                map[i]      <= i[PTAG_W-1:0];
+                arch_map[i] <= i[PTAG_W-1:0];
+            end
             busy <= {PRF_SIZE{1'b0}};
             for (i = 0; i < SPEC_CNT; i = i + 1)
                 fl_mem[i] <= (SPEC_BASE + i);
@@ -111,8 +120,9 @@ module rename #(
             fl_tail <= 5'd0;
             fl_cnt  <= SPEC_CNT[4:0];
         end else if (flush) begin
+            // M3.4f: flush 将 spec map 复位为架构状态 (RRAT)
             for (i = 0; i < 32; i = i + 1)
-                map[i] <= i[PTAG_W-1:0];
+                map[i] <= arch_map[i];
             busy <= {PRF_SIZE{1'b0}};
             for (i = 0; i < SPEC_CNT; i = i + 1)
                 fl_mem[i] <= (SPEC_BASE + i);
@@ -120,6 +130,9 @@ module rename #(
             fl_tail <= 5'd0;
             fl_cnt  <= SPEC_CNT[4:0];
         end else begin
+            // M3.4f: commit 时更新 RRAT (slot1 后序胜)
+            if (commit0_valid && commit0_rd != 5'd0) arch_map[commit0_rd] <= commit0_ptag_new;
+            if (commit1_valid && commit1_rd != 5'd0) arch_map[commit1_rd] <= commit1_ptag_new;
             // map updates (slot1 wins on same-rd by program order)
             if (alloc0_ok) map[s0_rd] <= s0_new;
             if (alloc1_ok) map[s1_rd] <= s1_new;
