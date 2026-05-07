@@ -1328,6 +1328,42 @@ module cpu_top (
         .max_occupancy        (rs_sh_max_occupancy)
     );
 
+    // ============================================================
+    // Phase A2-step1 — shadow Return Address Stack (observability)
+    //
+    // Quantifies what a 16-deep RAS would buy us before adding it
+    // to the BPU PC-select path. Driven by EX-stage retired jumps.
+    // ============================================================
+    wire        ras_sh_jmp_valid = ex_is_branch && id_ex_is_jump;
+    wire [31:0] ras_sh_jal_count, ras_sh_jalr_count;
+    wire [31:0] ras_sh_call_count, ras_sh_ret_count;
+    wire [31:0] ras_sh_ret_pred_correct, ras_sh_ret_pred_wrong;
+    wire [31:0] ras_sh_bpu_pred_correct_on_ret;
+    wire [31:0] ras_sh_underflow, ras_sh_overflow;
+
+    ras_shadow #(.DEPTH(16)) u_ras_shadow (
+        .clk                     (clk),
+        .rst_n                   (rst_n),
+        .flush                   (ex_redirect),
+        .jmp_valid               (ras_sh_jmp_valid),
+        .jmp_is_jalr             (ex_is_jalr),
+        .jmp_rd                  (id_ex_rd),
+        .jmp_rs1                 (id_ex_rs1_addr),
+        .jmp_pc                  (id_ex_pc),
+        .jmp_actual_target       (ex_actual_target),
+        .jmp_pred_target         (id_ex_pred_target),
+        .jmp_pred_taken          (id_ex_pred_taken),
+        .jal_count               (ras_sh_jal_count),
+        .jalr_count              (ras_sh_jalr_count),
+        .call_count              (ras_sh_call_count),
+        .ret_count               (ras_sh_ret_count),
+        .ret_pred_correct        (ras_sh_ret_pred_correct),
+        .ret_pred_wrong          (ras_sh_ret_pred_wrong),
+        .bpu_pred_correct_on_ret (ras_sh_bpu_pred_correct_on_ret),
+        .stack_underflow         (ras_sh_underflow),
+        .stack_overflow          (ras_sh_overflow)
+    );
+
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
     assign dbg_instr_wb = mem_wb_instr;

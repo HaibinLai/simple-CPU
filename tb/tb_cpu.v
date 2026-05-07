@@ -340,6 +340,13 @@ module tb_cpu;
                      u_dut.rs_sh_ready_at_alloc_count,
                      u_dut.rs_sh_wait_cycles_total,
                      u_dut.rs_sh_max_occupancy);
+            // A2-step1: shadow RAS observability
+            $display("[TB] ras_sh: jal=%0d jalr=%0d  call=%0d ret=%0d  ret_ras_ok=%0d ret_ras_bad=%0d  ret_bpu_ok=%0d  uf=%0d of=%0d",
+                     u_dut.ras_sh_jal_count, u_dut.ras_sh_jalr_count,
+                     u_dut.ras_sh_call_count, u_dut.ras_sh_ret_count,
+                     u_dut.ras_sh_ret_pred_correct, u_dut.ras_sh_ret_pred_wrong,
+                     u_dut.ras_sh_bpu_pred_correct_on_ret,
+                     u_dut.ras_sh_underflow, u_dut.ras_sh_overflow);
             // 注：当前 ROB.flush 一次清光所有条目（包括 mispredict 之前的老指令），
             // 老指令到 WB 时它的 ROB 项已被清 → orphan WB。这不影响 program correctness
             // (regfile 仍是权威)。M3.5-step2 将引入 partial flush 修复此问题。
