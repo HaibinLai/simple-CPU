@@ -1273,6 +1273,61 @@ module cpu_top (
         end
     end
 
+    // ============================================================
+    // Tomasulo Phase T2a — shadow Reservation Station (observability)
+    //
+    // Runs in parallel with the in-order pipeline. Driven by the same
+    // dispatch/CDB events. Does NOT affect issue. Counters answer:
+    //   - how often would RS be full (back-pressure dispatch)?
+    //   - how many cycles do entries wait for operands?
+    //   - what % of allocs are ready immediately?
+    // ============================================================
+    // Forward-declare rename outputs the shadow RS reads (real declarations
+    // + instance live further below; Verilog wires can be forward-referenced
+    // but indexed bit-select wants the decl already in scope).
+    wire [47:0] rn_busy_vec;
+
+    // Eligible dispatch into shadow RS = slot0 issuing an ALU op
+    //   (not load, not store, not branch, not jump). Limit to ALU so
+    //   the comparison vs an ALU-RS is apples-to-apples.
+    wire rs_sh_alu_op = ifq_pop_slot0
+                        && !id_mem_read && !id_mem_write
+                        && (id_br_type == `BR_NONE) && !id_is_jump
+                        && !id_is_ecall && !id_is_mret && !id_is_illegal;
+
+    // ready-at-alloc test: rename's busy_vec is the post-update busy after
+    // commit/wb in the previous cycle, so it reflects "is producer still
+    // in-flight?". ptag==0 (x0) is always ready.
+    wire rs_sh_alloc_rs1_rdy = (rn_s0_rs1_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs1_ptag];
+    wire rs_sh_alloc_rs2_rdy = (rn_s0_rs2_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs2_ptag];
+
+    wire [31:0] rs_sh_alloc_count, rs_sh_issue_count, rs_sh_full_stall_count;
+    wire [31:0] rs_sh_wait_cycles_total, rs_sh_ready_at_alloc_count;
+    wire [31:0] rs_sh_max_occupancy;
+
+    rs_shadow #(.DEPTH(4), .PTAG_W(6), .ROB_W(4)) u_rs_shadow (
+        .clk                  (clk),
+        .rst_n                (rst_n),
+        .flush                (ex_redirect),
+        .alloc_valid          (rs_sh_alu_op),
+        .alloc_rs1_ptag       (rn_s0_rs1_ptag),
+        .alloc_rs2_ptag       (rn_s0_rs2_ptag),
+        .alloc_rs1_ready      (rs_sh_alloc_rs1_rdy),
+        .alloc_rs2_ready      (rs_sh_alloc_rs2_rdy),
+        .alloc_rd_ptag        (rn_s0_rd_ptag_new),
+        .alloc_rob_tag        (rob_alloc_tag_0),
+        .cdb0_valid           (cdb0_valid),
+        .cdb0_ptag            (cdb0_ptag),
+        .cdb1_valid           (cdb1_valid),
+        .cdb1_ptag            (cdb1_ptag),
+        .alloc_count          (rs_sh_alloc_count),
+        .issue_count          (rs_sh_issue_count),
+        .full_stall_count     (rs_sh_full_stall_count),
+        .wait_cycles_total    (rs_sh_wait_cycles_total),
+        .ready_at_alloc_count (rs_sh_ready_at_alloc_count),
+        .max_occupancy        (rs_sh_max_occupancy)
+    );
+
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
     assign dbg_instr_wb = mem_wb_instr;
@@ -1285,11 +1340,11 @@ module cpu_top (
 
     // Forward decls (实例化在文件末尾的 ROB 输出，rename 在此使用)
     // (M3.4d 已把 rob_commit_valid/rd/rw/ptag_new/ptag_old 上提到 PRF 段)
+    // (T2a 已把 rn_busy_vec 上提到 shadow RS 段供 bit-select 使用)
     wire [5:0]  rn_s0_rd_ptag_old;
     wire [5:0]  rn_s1_rd_ptag_old;
     wire        rn_stall;
     wire [4:0]  rn_free_count;
-    wire [47:0] rn_busy_vec;
 
     wire        rn_s0_alloc = ifq_pop_slot0 && id_reg_write && (id_rd != 5'd0);
     wire        rn_s1_alloc = ifq_pop_slot1 && id1_reg_write && (id1_rd != 5'd0);

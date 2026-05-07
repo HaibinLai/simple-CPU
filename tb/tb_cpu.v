@@ -333,6 +333,13 @@ module tb_cpu;
             $display("[TB] cdb: lane0=%0d lane1=%0d total=%0d  (cpu_top: c0=%0d c1=%0d)",
                      c_cdb0_total, c_cdb1_total, c_cdb0_total + c_cdb1_total,
                      u_dut.cdb0_event_cnt, u_dut.cdb1_event_cnt);
+            // Tomasulo T2a: shadow RS observability
+            $display("[TB] rs_sh: alloc=%0d issue=%0d full_stall=%0d  ready_at_alloc=%0d  wait_cycles=%0d  max_occ=%0d",
+                     u_dut.rs_sh_alloc_count, u_dut.rs_sh_issue_count,
+                     u_dut.rs_sh_full_stall_count,
+                     u_dut.rs_sh_ready_at_alloc_count,
+                     u_dut.rs_sh_wait_cycles_total,
+                     u_dut.rs_sh_max_occupancy);
             // 注：当前 ROB.flush 一次清光所有条目（包括 mispredict 之前的老指令），
             // 老指令到 WB 时它的 ROB 项已被清 → orphan WB。这不影响 program correctness
             // (regfile 仍是权威)。M3.5-step2 将引入 partial flush 修复此问题。
