@@ -11,13 +11,21 @@ VCD     := $(SIM_DIR)/cpu.vcd
 PROG ?= tb/programs/test01.hex
 TIMEOUT_NS ?= 2000
 
+# 设置 VCD=1 才会 dump 波形（回归测试默认关闭，避免巨量磁盘 I/O 卡顿）
+VCD ?= 0
+ifeq ($(VCD),1)
+  VCD_FLAGS := -DENABLE_VCD -DVCD_FILE='"$(SIM_DIR)/cpu.vcd"'
+else
+  VCD_FLAGS :=
+endif
+
 .PHONY: all run wave clean build
 
 all: build
 
 # 每次都重新编译，避免 PROG 切换时使用旧的 VVP
 build: | $(SIM_DIR)
-	iverilog -g2012 -I rtl/core -DPROG_HEX='"$(PROG)"' -DSIM_TIMEOUT_NS=$(TIMEOUT_NS) -o $(VVP) -s $(TOP) $(RTL) $(TB)
+	iverilog -g2012 -I rtl/core -DPROG_HEX='"$(PROG)"' -DSIM_TIMEOUT_NS=$(TIMEOUT_NS) $(VCD_FLAGS) -o $(VVP) -s $(TOP) $(RTL) $(TB)
 
 $(SIM_DIR):
 	mkdir -p $(SIM_DIR)
@@ -25,8 +33,10 @@ $(SIM_DIR):
 run: build
 	vvp $(VVP)
 
-wave: $(VCD)
-	gtkwave $(VCD) &
+wave:
+	$(MAKE) build VCD=1
+	vvp $(VVP)
+	gtkwave $(SIM_DIR)/cpu.vcd &
 
 clean:
 	rm -rf $(SIM_DIR)

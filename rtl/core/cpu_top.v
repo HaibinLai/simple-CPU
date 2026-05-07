@@ -268,6 +268,28 @@ module cpu_top (
 
     wire [3:0]  ifq_count;
 
+    // ---- A2-step2: static JAL prediction for slot1 ----
+    // The BPU is queried only at slot0's PC. JALs landing in slot1 therefore
+    // arrive in IFQ with pred_taken=0 and ALWAYS mispredict at EX. Since JAL's
+    // target is encoded entirely in the instruction (PC-relative), we can
+    // compute it statically at push time, costing zero predictor state.
+    wire        slot1_is_jal     = (if_id_instr1[6:0] == 7'b1101111); // OPC_JAL
+    wire [31:0] slot1_jal_imm    = {{12{if_id_instr1[31]}},
+                                     if_id_instr1[19:12],
+                                     if_id_instr1[20],
+                                     if_id_instr1[30:21],
+                                     1'b0};
+    wire [31:0] slot1_jal_target = if_id_pc1 + slot1_jal_imm;
+    wire        slot1_static_pred_taken  = slot1_is_jal;
+    wire [31:0] slot1_static_pred_target = slot1_jal_target;
+    // Observability counter (kept alive by reading in stalls block / TB peek)
+    reg  [31:0] c_slot1_jal_static_pred;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) c_slot1_jal_static_pred <= 32'b0;
+        else if (if_id_valid1 && !if_freeze && slot1_is_jal)
+            c_slot1_jal_static_pred <= c_slot1_jal_static_pred + 32'd1;
+    end
+
     ifq #(.DEPTH(8), .AW(3), .PRED_GHR_W(BPU_GHR_W)) u_ifq (
         .clk    (clk),
         .rst_n  (rst_n),
@@ -282,8 +304,9 @@ module cpu_top (
         .push_valid_1       (if_id_valid1 && !if_freeze),
         .push_pc_1          (if_id_pc1),
         .push_instr_1       (if_id_instr1),
-        .push_pred_taken_1  (1'b0),    // slot1 不携带预测（仅 slot0 可能是分支）
-        .push_pred_target_1 (32'b0),
+        // A2-step2: static JAL prediction for slot1 (BPU only sees slot0 PC)
+        .push_pred_taken_1  (slot1_static_pred_taken),
+        .push_pred_target_1 (slot1_static_pred_target),
         .push_pred_ghr_1    ({BPU_GHR_W{1'b0}}),
         .full               (ifq_full),
         .almost_full        (ifq_almost_full),

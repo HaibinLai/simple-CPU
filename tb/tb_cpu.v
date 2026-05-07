@@ -347,6 +347,20 @@ module tb_cpu;
                      u_dut.ras_sh_ret_pred_correct, u_dut.ras_sh_ret_pred_wrong,
                      u_dut.ras_sh_bpu_pred_correct_on_ret,
                      u_dut.ras_sh_underflow, u_dut.ras_sh_overflow);
+            // A2-step2: BPU/BTB hit-rate on uncond jumps
+            $display("[TB] bpu_btb: resolved=%0d uncond=%0d  uncond_btb_hit=%0d uncond_btb_alloc=%0d  uncond_hit_rate=%f",
+                     u_dut.u_bpu.stat_resolve_total,
+                     u_dut.u_bpu.stat_resolve_uncond,
+                     u_dut.u_bpu.stat_btb_hit_uncond,
+                     u_dut.u_bpu.stat_btb_alloc_uncond,
+                     (u_dut.u_bpu.stat_resolve_uncond == 0) ? 0.0 :
+                       1.0*u_dut.u_bpu.stat_btb_hit_uncond/u_dut.u_bpu.stat_resolve_uncond);
+            $display("[TB] bpu_btb: uncond_target_correct=%0d uncond_target_wrong=%0d  effective_pred_rate=%f",
+                     u_dut.u_bpu.stat_btb_target_correct,
+                     u_dut.u_bpu.stat_btb_target_wrong,
+                     (u_dut.u_bpu.stat_resolve_uncond == 0) ? 0.0 :
+                       1.0*u_dut.u_bpu.stat_btb_target_correct/u_dut.u_bpu.stat_resolve_uncond);
+            $display("[TB] slot1_jal_static_pred=%0d", u_dut.c_slot1_jal_static_pred);
             // 注：当前 ROB.flush 一次清光所有条目（包括 mispredict 之前的老指令），
             // 老指令到 WB 时它的 ROB 项已被清 → orphan WB。这不影响 program correctness
             // (regfile 仍是权威)。M3.5-step2 将引入 partial flush 修复此问题。
