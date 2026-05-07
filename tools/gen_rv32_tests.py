@@ -114,11 +114,12 @@ class Program:
 
 
 class RV32ISim:
-    def __init__(self, words: List[int], mem_words: int = 16384):
+    def __init__(self, words: List[int], mem_words: int = 16384, pc_base: int = 0):
         self.reg = [0] * 32
         self.mem = [0] * mem_words
         self.imem = list(words)
-        self.pc = 0
+        self.pc_base = pc_base & 0xFFFFFFFF
+        self.pc = self.pc_base
         self.steps = 0
         self.max_steps = 10000
 
@@ -191,9 +192,10 @@ class RV32ISim:
             raise RuntimeError("simulation step overflow")
         self.steps += 1
 
-        if (self.pc >> 2) >= len(self.imem):
+        idx = (u32(self.pc - self.pc_base)) >> 2
+        if idx >= len(self.imem):
             return False
-        instr = self.imem[self.pc >> 2]
+        instr = self.imem[idx]
 
         opcode = instr & 0x7F
         rd = (instr >> 7) & 0x1F
