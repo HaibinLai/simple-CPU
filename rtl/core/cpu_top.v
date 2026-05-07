@@ -1237,6 +1237,42 @@ module cpu_top (
     assign prf_wa3 = id1_ex_rd_ptag;
     assign prf_wd3 = slot1_wb_data;
 
+    // ============================================================
+    // Tomasulo Phase T1 — Common Data Bus (CDB) abstraction
+    // Pure aliasing of existing WB→PRF wires. Zero functional change.
+    // Future T2 reservation stations will snoop these signals to wake
+    // up waiting entries (set rs1/rs2 ready, capture value).
+    // ============================================================
+    wire        cdb0_valid;
+    wire [5:0]  cdb0_ptag;
+    wire [31:0] cdb0_value;
+    wire [3:0]  cdb0_rob_tag;
+    wire        cdb1_valid;
+    wire [5:0]  cdb1_ptag;
+    wire [31:0] cdb1_value;
+    wire [3:0]  cdb1_rob_tag;
+    assign cdb0_valid   = prf_we0;
+    assign cdb0_ptag    = mem_wb_rd_ptag;
+    assign cdb0_value   = wb_data;
+    assign cdb0_rob_tag = mem_wb_rob_tag;
+    assign cdb1_valid   = prf_we1;
+    assign cdb1_ptag    = id1_ex_rd_ptag;
+    assign cdb1_value   = slot1_wb_data;
+    assign cdb1_rob_tag = id1_ex_rob_tag;
+
+    // T1 stats: also keep CDB wires alive through iverilog DCE so TB peeks bind.
+    reg [31:0] cdb0_event_cnt;
+    reg [31:0] cdb1_event_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cdb0_event_cnt <= 32'b0;
+            cdb1_event_cnt <= 32'b0;
+        end else begin
+            if (cdb0_valid) cdb0_event_cnt <= cdb0_event_cnt + 32'd1;
+            if (cdb1_valid) cdb1_event_cnt <= cdb1_event_cnt + 32'd1;
+        end
+    end
+
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;
     assign dbg_instr_wb = mem_wb_instr;

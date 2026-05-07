@@ -60,6 +60,10 @@ module tb_cpu;
     integer c_wb1_total       = 0;
     integer c_wb1_orphan      = 0;  // slot1 EX1 wb 有效但 ROB[tag] 不 valid
 
+    // Tomasulo T1: CDB sanity counters (peeked from cpu_top's own counters).
+    integer c_cdb0_total      = 0;
+    integer c_cdb1_total      = 0;
+
     // M3.3: shadow regfile，由 ROB commit 驱动；结束时与真 regfile 比对
     reg [31:0] shadow_rf [0:31];
     integer    sh_i;
@@ -212,6 +216,10 @@ module tb_cpu;
                     c_wb1_orphan <= c_wb1_orphan + 1;
                 end
             end
+
+            // Tomasulo T1: CDB sanity — should match prf_we* exactly.
+            if (u_dut.prf_we0) c_cdb0_total <= c_cdb0_total + 1;
+            if (u_dut.prf_we1) c_cdb1_total <= c_cdb1_total + 1;
             if (prev_flush) begin
                 if (u_dut.rn_free_count != 5'd16) begin
                     c_flush_bad_free <= c_flush_bad_free + 1;
@@ -320,6 +328,11 @@ module tb_cpu;
                      c_flushes, c_flush_bad_free, c_flush_bad_busy);
             $display("[TB] wb_orph slot0=%0d/%0d  slot1=%0d/%0d",
                      c_wb0_orphan, c_wb0_total, c_wb1_orphan, c_wb1_total);
+            // Tomasulo T1: CDB events should equal prf_we* writes.
+            // Cross-check: tb counter (peeked at prf_we) vs cpu_top's own cdb counter.
+            $display("[TB] cdb: lane0=%0d lane1=%0d total=%0d  (cpu_top: c0=%0d c1=%0d)",
+                     c_cdb0_total, c_cdb1_total, c_cdb0_total + c_cdb1_total,
+                     u_dut.cdb0_event_cnt, u_dut.cdb1_event_cnt);
             // 注：当前 ROB.flush 一次清光所有条目（包括 mispredict 之前的老指令），
             // 老指令到 WB 时它的 ROB 项已被清 → orphan WB。这不影响 program correctness
             // (regfile 仍是权威)。M3.5-step2 将引入 partial flush 修复此问题。
