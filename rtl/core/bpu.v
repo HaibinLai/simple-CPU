@@ -21,7 +21,13 @@
 module bpu #(
     parameter BHT_IDX_W = 8,    // 256
     parameter BTB_IDX_W = 5,    // 32 sets
-    parameter GHR_W     = 32    // 长全局历史，GShare/TAGE 均使用 fold
+    parameter GHR_W     = 32,   // 长全局历史，GShare/TAGE 均使用 fold
+    parameter T1_IDX_W  = 7,
+    parameter T1_TAG_W  = 8,
+    parameter T2_IDX_W  = 7,
+    parameter T2_TAG_W  = 9,
+    parameter CTR_W     = 3,
+    parameter U_W       = 2
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -43,9 +49,23 @@ module bpu #(
     localparam BHT_SIZE  = 1 << BHT_IDX_W;
     localparam BTB_SETS  = 1 << BTB_IDX_W;
     localparam BTB_TAG_W = 32 - BTB_IDX_W - 2;
+    localparam T1_SIZE   = 1 << T1_IDX_W;
+    localparam T2_SIZE   = 1 << T2_IDX_W;
 
-    // ----- BHT (GShare) -----
+    // ----- base BHT (T0) -----
     reg [1:0] bht [0:BHT_SIZE-1];
+
+    // ----- TAGE T1 -----
+    reg                t1_valid [0:T1_SIZE-1];
+    reg [T1_TAG_W-1:0] t1_tag   [0:T1_SIZE-1];
+    reg [CTR_W-1:0]    t1_ctr   [0:T1_SIZE-1];
+    reg [U_W-1:0]      t1_u     [0:T1_SIZE-1];
+
+    // ----- TAGE T2 -----
+    reg                t2_valid [0:T2_SIZE-1];
+    reg [T2_TAG_W-1:0] t2_tag   [0:T2_SIZE-1];
+    reg [CTR_W-1:0]    t2_ctr   [0:T2_SIZE-1];
+    reg [U_W-1:0]      t2_u     [0:T2_SIZE-1];
 
     // ----- BTB 2-way -----
     reg                  btb0_valid  [0:BTB_SETS-1];
@@ -70,6 +90,14 @@ module bpu #(
             btb1_valid[i]  = 1'b0;
             btb1_uncond[i] = 1'b0;
             btb_lru[i]     = 1'b0;
+        end
+        for (i = 0; i < T1_SIZE; i = i + 1) begin
+            t1_valid[i] = 1'b0; t1_tag[i] = {T1_TAG_W{1'b0}};
+            t1_ctr[i]   = {1'b1, {(CTR_W-1){1'b0}}}; t1_u[i] = {U_W{1'b0}};
+        end
+        for (i = 0; i < T2_SIZE; i = i + 1) begin
+            t2_valid[i] = 1'b0; t2_tag[i] = {T2_TAG_W{1'b0}};
+            t2_ctr[i]   = {1'b1, {(CTR_W-1){1'b0}}}; t2_u[i] = {U_W{1'b0}};
         end
     end
 
@@ -96,15 +124,48 @@ module bpu #(
         end
     endfunction
 
+    // ----- TAGE folded-history helpers (手写展开) -----
+    // T1 hist=8: 7-bit idx = g[6:0] ^ {6'b0, g[7]};  8-bit tag = g[7:0]
+    function [T1_IDX_W-1:0] fold_t1_idx;
+        input [GHR_W-1:0] g;
+        begin fold_t1_idx = g[6:0] ^ {6'b0, g[7]}; end
+    endfunction
+    function [T1_TAG_W-1:0] fold_t1_tag;
+        input [GHR_W-1:0] g;
+        begin fold_t1_tag = g[7:0]; end
+    endfunction
+    // T2 hist=16: 7-bit idx = g[6:0]^g[13:7]^{5'b0,g[15:14]}; 9-bit tag = g[8:0]^{2'b0,g[15:9]}
+    function [T2_IDX_W-1:0] fold_t2_idx;
+        input [GHR_W-1:0] g;
+        begin fold_t2_idx = g[6:0] ^ g[13:7] ^ {5'b0, g[15:14]}; end
+    endfunction
+    function [T2_TAG_W-1:0] fold_t2_tag;
+        input [GHR_W-1:0] g;
+        begin fold_t2_tag = g[8:0] ^ {2'b0, g[15:9]}; end
+    endfunction
+
     wire [BHT_IDX_W-1:0] if_pc_idx  = if_pc[BHT_IDX_W+1:2];
     wire [BHT_IDX_W-1:0] if_bht_idx = if_pc_idx ^ fold_bht(ghr);
-    wire bht_taken = bht[if_bht_idx][1];
-    // 命中项是否为无条件跳转。若是，pred_taken 跳过 BHT 门控。
+    wire if_base_pred = bht[if_bht_idx][1];
+
+    // TAGE IF 查表
+    wire [T1_IDX_W-1:0] if_t1_idx  = if_pc[T1_IDX_W+1:2]  ^ fold_t1_idx(ghr);
+    wire [T1_TAG_W-1:0] if_t1_tagc = if_pc[T1_TAG_W+9:10] ^ fold_t1_tag(ghr);
+    wire [T2_IDX_W-1:0] if_t2_idx  = if_pc[T2_IDX_W+1:2]  ^ fold_t2_idx(ghr);
+    wire [T2_TAG_W-1:0] if_t2_tagc = if_pc[T2_TAG_W+9:10] ^ fold_t2_tag(ghr);
+    wire if_t1_present = t1_valid[if_t1_idx] && (t1_tag[if_t1_idx] == if_t1_tagc);
+    wire if_t2_present = t2_valid[if_t2_idx] && (t2_tag[if_t2_idx] == if_t2_tagc);
+    wire if_t1_pred    = t1_ctr[if_t1_idx][CTR_W-1];
+    wire if_t2_pred    = t2_ctr[if_t2_idx][CTR_W-1];
+    wire if_tage_pred  = if_t2_present ? if_t2_pred :
+                         if_t1_present ? if_t1_pred : if_base_pred;
+
+    // 命中项是否为无条件跳转。若是，pred_taken 跳过条件预测。
     wire if_hit_uncond = (if_hit0 && btb0_uncond[if_btb_idx]) ||
                          (if_hit1 && btb1_uncond[if_btb_idx]);
 
     assign pred_ghr_o  = ghr;
-    assign pred_taken  = btb_hit && (if_hit_uncond || bht_taken);
+    assign pred_taken  = btb_hit && (if_hit_uncond || if_tage_pred);
     assign pred_target = if_hit0 ? btb0_target[if_btb_idx] : btb1_target[if_btb_idx];
 
     // -------- 训练 --------
@@ -116,6 +177,26 @@ module bpu #(
     wire u_hit0 = btb0_valid[upd_btb_idx] && (btb0_tag[upd_btb_idx] == upd_btb_tag);
     wire u_hit1 = btb1_valid[upd_btb_idx] && (btb1_tag[upd_btb_idx] == upd_btb_tag);
 
+    // TAGE update-side indices/tags using snapshot ghr
+    wire [T1_IDX_W-1:0] u_t1_idx  = upd_pc[T1_IDX_W+1:2]  ^ fold_t1_idx(upd_pred_ghr);
+    wire [T1_TAG_W-1:0] u_t1_tagc = upd_pc[T1_TAG_W+9:10] ^ fold_t1_tag(upd_pred_ghr);
+    wire [T2_IDX_W-1:0] u_t2_idx  = upd_pc[T2_IDX_W+1:2]  ^ fold_t2_idx(upd_pred_ghr);
+    wire [T2_TAG_W-1:0] u_t2_tagc = upd_pc[T2_TAG_W+9:10] ^ fold_t2_tag(upd_pred_ghr);
+    wire u_t1_present = t1_valid[u_t1_idx] && (t1_tag[u_t1_idx] == u_t1_tagc);
+    wire u_t2_present = t2_valid[u_t2_idx] && (t2_tag[u_t2_idx] == u_t2_tagc);
+    wire u_t1_pred    = t1_ctr[u_t1_idx][CTR_W-1];
+    wire u_t2_pred    = t2_ctr[u_t2_idx][CTR_W-1];
+    wire u_base_pred  = bht[upd_bht_idx][1];
+    wire [1:0] u_chosen = u_t2_present ? 2'd2 : (u_t1_present ? 2'd1 : 2'd0);
+    wire u_tage_pred = (u_chosen == 2'd2) ? u_t2_pred :
+                       (u_chosen == 2'd1) ? u_t1_pred : u_base_pred;
+    wire u_alt_pred  = (u_chosen == 2'd2) ? (u_t1_present ? u_t1_pred : u_base_pred)
+                                          : u_base_pred;
+    wire u_tage_ok   = (u_tage_pred == upd_taken);
+    wire u_t1_alloc_ok = (t1_u[u_t1_idx] == {U_W{1'b0}});
+    wire u_t2_alloc_ok = (t2_u[u_t2_idx] == {U_W{1'b0}});
+
+    integer j;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < BHT_SIZE; i = i + 1) bht[i] <= 2'b01;
@@ -126,15 +207,94 @@ module bpu #(
                 btb1_uncond[i] <= 1'b0;
                 btb_lru[i]     <= 1'b0;
             end
+            for (i = 0; i < T1_SIZE; i = i + 1) begin
+                t1_valid[i] <= 1'b0; t1_tag[i] <= {T1_TAG_W{1'b0}};
+                t1_ctr[i]   <= {1'b1, {(CTR_W-1){1'b0}}}; t1_u[i] <= {U_W{1'b0}};
+            end
+            for (i = 0; i < T2_SIZE; i = i + 1) begin
+                t2_valid[i] <= 1'b0; t2_tag[i] <= {T2_TAG_W{1'b0}};
+                t2_ctr[i]   <= {1'b1, {(CTR_W-1){1'b0}}}; t2_u[i] <= {U_W{1'b0}};
+            end
             ghr <= {GHR_W{1'b0}};
         end else if (upd_valid) begin
-            // BHT 饱和更新
+            // base BHT 饰和更新（TAGE T0）
             if (upd_taken) begin
                 if (bht[upd_bht_idx] != 2'b11)
                     bht[upd_bht_idx] <= bht[upd_bht_idx] + 2'b01;
             end else begin
                 if (bht[upd_bht_idx] != 2'b00)
                     bht[upd_bht_idx] <= bht[upd_bht_idx] - 2'b01;
+            end
+
+            // TAGE T1/T2 仅对条件分支训练
+            if (!upd_is_uncond) begin
+                if (u_chosen == 2'd1) begin
+                    if (upd_taken) begin
+                        if (t1_ctr[u_t1_idx] != {CTR_W{1'b1}}) t1_ctr[u_t1_idx] <= t1_ctr[u_t1_idx] + 1'b1;
+                    end else begin
+                        if (t1_ctr[u_t1_idx] != {CTR_W{1'b0}}) t1_ctr[u_t1_idx] <= t1_ctr[u_t1_idx] - 1'b1;
+                    end
+                end else if (u_chosen == 2'd2) begin
+                    if (upd_taken) begin
+                        if (t2_ctr[u_t2_idx] != {CTR_W{1'b1}}) t2_ctr[u_t2_idx] <= t2_ctr[u_t2_idx] + 1'b1;
+                    end else begin
+                        if (t2_ctr[u_t2_idx] != {CTR_W{1'b0}}) t2_ctr[u_t2_idx] <= t2_ctr[u_t2_idx] - 1'b1;
+                    end
+                end
+
+                if (u_chosen != 2'd0 && (u_tage_pred != u_alt_pred)) begin
+                    if (u_chosen == 2'd1) begin
+                        if (u_tage_ok) begin
+                            if (t1_u[u_t1_idx] != {U_W{1'b1}}) t1_u[u_t1_idx] <= t1_u[u_t1_idx] + 1'b1;
+                        end else begin
+                            if (t1_u[u_t1_idx] != {U_W{1'b0}}) t1_u[u_t1_idx] <= t1_u[u_t1_idx] - 1'b1;
+                        end
+                    end else begin
+                        if (u_tage_ok) begin
+                            if (t2_u[u_t2_idx] != {U_W{1'b1}}) t2_u[u_t2_idx] <= t2_u[u_t2_idx] + 1'b1;
+                        end else begin
+                            if (t2_u[u_t2_idx] != {U_W{1'b0}}) t2_u[u_t2_idx] <= t2_u[u_t2_idx] - 1'b1;
+                        end
+                    end
+                end
+
+                if (!u_tage_ok) begin
+                    case (u_chosen)
+                        2'd0: begin
+                            if (u_t1_alloc_ok) begin
+                                t1_valid[u_t1_idx] <= 1'b1;
+                                t1_tag[u_t1_idx]   <= u_t1_tagc;
+                                t1_ctr[u_t1_idx]   <= upd_taken ? {1'b1, {(CTR_W-1){1'b0}}}
+                                                                : {1'b0, {(CTR_W-1){1'b1}}};
+                                t1_u[u_t1_idx]     <= {U_W{1'b0}};
+                            end else if (u_t2_alloc_ok) begin
+                                t2_valid[u_t2_idx] <= 1'b1;
+                                t2_tag[u_t2_idx]   <= u_t2_tagc;
+                                t2_ctr[u_t2_idx]   <= upd_taken ? {1'b1, {(CTR_W-1){1'b0}}}
+                                                                : {1'b0, {(CTR_W-1){1'b1}}};
+                                t2_u[u_t2_idx]     <= {U_W{1'b0}};
+                            end else begin
+                                for (j = 0; j < T1_SIZE; j = j + 1)
+                                    if (t1_u[j] != {U_W{1'b0}}) t1_u[j] <= t1_u[j] - 1'b1;
+                                for (j = 0; j < T2_SIZE; j = j + 1)
+                                    if (t2_u[j] != {U_W{1'b0}}) t2_u[j] <= t2_u[j] - 1'b1;
+                            end
+                        end
+                        2'd1: begin
+                            if (u_t2_alloc_ok) begin
+                                t2_valid[u_t2_idx] <= 1'b1;
+                                t2_tag[u_t2_idx]   <= u_t2_tagc;
+                                t2_ctr[u_t2_idx]   <= upd_taken ? {1'b1, {(CTR_W-1){1'b0}}}
+                                                                : {1'b0, {(CTR_W-1){1'b1}}};
+                                t2_u[u_t2_idx]     <= {U_W{1'b0}};
+                            end else begin
+                                for (j = 0; j < T2_SIZE; j = j + 1)
+                                    if (t2_u[j] != {U_W{1'b0}}) t2_u[j] <= t2_u[j] - 1'b1;
+                            end
+                        end
+                        default: ;
+                    endcase
+                end
             end
 
             // BTB：taken 时更新或分配（LRU 替换），not-taken 不动
