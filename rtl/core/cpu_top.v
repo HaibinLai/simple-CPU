@@ -334,7 +334,9 @@ module cpu_top (
                            (id1_opcode == `OP_LUI)  || (id1_opcode == `OP_AUIPC);
     // R3 扩展：条件分支（在 EX1 解析，隐式预测 not-taken）也可进入 slot1。
     wire id1_is_branch_op = (id1_opcode == `OP_BRANCH);
-    wire id1_is_pairable  = id1_is_alu_only || id1_is_branch_op;
+    // R4 扩展：load 也可进入 slot1（D$ 加只读端口 B；slot1 LOAD 1 周期完成）。
+    wire id1_is_load_op   = (id1_opcode == `OP_LOAD);
+    wire id1_is_pairable  = id1_is_alu_only || id1_is_branch_op || id1_is_load_op;
 
     // Slot1 control 解码（仅供约束检查；暂不用于执行）
     wire [2:0] id1_imm_type;
@@ -370,9 +372,10 @@ module cpu_top (
     // 1. Slot1 有效 && 是 可配对 指令 (ALU-only 或 条件分支)
     // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
     wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM) ||
-                          (id1_opcode == `OP_BRANCH);
+                          (id1_opcode == `OP_BRANCH) || (id1_opcode == `OP_LOAD);
     wire slot1_rs2_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_BRANCH);
     // LUI/AUIPC 不读寄存器，不参与 RAW/load-use 检查
+    // OP_LOAD 仅读 rs1（基址），不读 rs2
 
     wire id1_no_raw_hazard = ~(
         (id_reg_write && (id_rd != 5'd0)) && (
@@ -392,6 +395,8 @@ module cpu_top (
     wire id1_no_load_use_hazard;
     // R2 BUG#5: cross-cycle WAW（在 id_ex/ex_mem/... 声明之后定义）
     wire id1_no_xcycle_waw;
+    // R4: slot1 LOAD 与在飞 slot0 STORE 的潜在地址别名（保守阻塞）
+    wire id1_no_store_alias_hazard;
 
     // R3 放宽：允许 slot0 为 branch / JAL / JALR / ecall / mret / illegal。
     // 详细推导：
@@ -408,7 +413,8 @@ module cpu_top (
     assign id2_issue_slot1 = id1_id2_valid1 && id1_is_pairable &&
                              id_slot0_safe_for_pair &&
                              id1_no_raw_hazard && id1_no_waw_hazard &&
-                             id1_no_load_use_hazard && id1_no_xcycle_waw;
+                             id1_no_load_use_hazard && id1_no_xcycle_waw &&
+                             id1_no_store_alias_hazard;
     wire id2_issue_slot0 = id1_id2_valid0;
 
     // 寄存器堆（写口接到 WB）
@@ -521,6 +527,8 @@ module cpu_top (
     reg        id1_ex_valid;
     reg [2:0]  id1_ex_imm_type;
     reg [2:0]  id1_ex_br_type;       // R3: 支持 slot1 = 条件分支
+    reg        id1_ex_mem_read;      // R4: slot1 LOAD
+    reg [2:0]  id1_ex_mem_funct3;    // R4: LB/LH/LW/LBU/LHU
     reg [3:0]  id1_ex_rob_tag;
     reg [5:0]  id1_ex_rd_ptag;
     reg [5:0]  id1_ex_rs1_ptag, id1_ex_rs2_ptag;
@@ -595,6 +603,20 @@ module cpu_top (
         )
     );
 
+    // R4: slot1 LOAD 在 EX1 组合读 D-Cache port B；slot0 store 要 4 周期后才落
+    // dmem，因此任何在飞的 slot0 store 都可能与 slot1 LOAD 形成地址别名 RAW。
+    // 当前没做地址比较 / store-buffer，保守做法：在飞 slot0 store 期间不发 slot1 LOAD。
+    // 包括 ID2 同 cycle slot0=STORE 的情形（因 slot0 4 周期后才写）。
+    assign id1_no_store_alias_hazard = ~(
+        id1_is_load_op && (
+            (id_mem_write) ||                                         // slot0 同 cycle = STORE
+            (id_ex_valid    && id_ex_mem_write   ) ||
+            (ex_mem_valid   && ex_mem_mem_write  ) ||
+            (ex2_agu_valid  && ex2_agu_mem_write ) ||
+            (agu_mem_valid  && agu_mem_mem_write )
+        )
+    );
+
     // ===== Milestone 2: Slot1 ID/EX Pipeline Update (Phase 2B) =====
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -614,6 +636,8 @@ module cpu_top (
             id1_ex_valid      <= 1'b0;
             id1_ex_imm_type   <= `IMM_NONE;
             id1_ex_br_type    <= `BR_NONE;
+            id1_ex_mem_read   <= 1'b0;
+            id1_ex_mem_funct3 <= 3'b0;
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
@@ -624,6 +648,7 @@ module cpu_top (
             id1_ex_reg_write  <= 1'b0;
             id1_ex_valid      <= 1'b0;
             id1_ex_br_type    <= `BR_NONE;
+            id1_ex_mem_read   <= 1'b0;
         end else begin
             id1_ex_pc         <= id1_id2_pc1;
             id1_ex_instr      <= id1_instr;
@@ -641,6 +666,8 @@ module cpu_top (
             id1_ex_valid      <= id2_issue_slot1;     // 仅当 slot1 满足配对条件时，流水线才推进
             id1_ex_imm_type   <= id1_imm_type;
             id1_ex_br_type    <= id1_br_type;
+            id1_ex_mem_read   <= id1_mem_read;     // R4: slot1 LOAD
+            id1_ex_mem_funct3 <= id1_mem_funct3;
             id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
             id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
             id1_ex_rs1_ptag   <= rn_s1_rs1_ptag;       // M3.4c: 携带 rs ptag
@@ -1023,13 +1050,21 @@ module cpu_top (
     end
 
     wire [31:0] dmem_rdata;
+    wire [31:0] dmem_rdata_b;     // R4: slot1 LOAD 读端口 B
+    // R4: slot1 LOAD 地址 = slot1 ALU 结果（rs1+imm，OP_LOAD 已置 a_src=RS1, b_src=IMM）
+    wire [31:0] slot1_mem_addr   = slot1_alu_y;
+    wire        slot1_mem_re     = id1_ex_valid && id1_ex_mem_read && !ex_redirect;
     dmem u_dmem (
-        .clk   (clk),
-        .addr  (agu_mem_alu_y),
-        .we    (agu_mem_mem_write & agu_mem_valid),
-        .be    (mem_be),
-        .wdata (mem_wdata_aligned),
-        .rdata (dmem_rdata)
+        .clk    (clk),
+        .addr   (agu_mem_alu_y),
+        .we     (agu_mem_mem_write & agu_mem_valid),
+        .be     (mem_be),
+        .wdata  (mem_wdata_aligned),
+        .rdata  (dmem_rdata),
+        // R4: 第二只读端口
+        .addr_b (slot1_mem_addr),
+        .re_b   (slot1_mem_re),
+        .rdata_b(dmem_rdata_b)
     );
 
     // load 数据按宽度/符号扩展
@@ -1104,9 +1139,49 @@ module cpu_top (
     // Slot1 在 EX1 阶段直接写回 regfile（ALU-only，无需 EX2/AGU/MEM）
     // R3: 当同 cycle slot0 (paired) 触发 ex_redirect（mispredict/exc/mret）时
     //     slot1 是错误路径，必须 kill WB / PRF write / ROB writeback。
+    // R4: slot1 也可以是 LOAD（1 周期完成：组合读 D-Cache port B + 符号扩展）。
+    //     slot1_load_data 在 EX1 同 cycle 组合产生。
+
+    wire [1:0] slot1_byte_off = slot1_mem_addr[1:0];
+    reg [31:0] slot1_load_data;
+    always @(*) begin
+        case (id1_ex_mem_funct3)
+            3'b000: begin // LB
+                case (slot1_byte_off)
+                    2'd0: slot1_load_data = {{24{dmem_rdata_b[7]}},  dmem_rdata_b[7:0]};
+                    2'd1: slot1_load_data = {{24{dmem_rdata_b[15]}}, dmem_rdata_b[15:8]};
+                    2'd2: slot1_load_data = {{24{dmem_rdata_b[23]}}, dmem_rdata_b[23:16]};
+                    2'd3: slot1_load_data = {{24{dmem_rdata_b[31]}}, dmem_rdata_b[31:24]};
+                endcase
+            end
+            3'b001: begin // LH
+                if (slot1_byte_off == 2'd0)
+                    slot1_load_data = {{16{dmem_rdata_b[15]}}, dmem_rdata_b[15:0]};
+                else
+                    slot1_load_data = {{16{dmem_rdata_b[31]}}, dmem_rdata_b[31:16]};
+            end
+            3'b010: slot1_load_data = dmem_rdata_b; // LW
+            3'b100: begin // LBU
+                case (slot1_byte_off)
+                    2'd0: slot1_load_data = {24'b0, dmem_rdata_b[7:0]};
+                    2'd1: slot1_load_data = {24'b0, dmem_rdata_b[15:8]};
+                    2'd2: slot1_load_data = {24'b0, dmem_rdata_b[23:16]};
+                    2'd3: slot1_load_data = {24'b0, dmem_rdata_b[31:24]};
+                endcase
+            end
+            3'b101: begin // LHU
+                if (slot1_byte_off == 2'd0)
+                    slot1_load_data = {16'b0, dmem_rdata_b[15:0]};
+                else
+                    slot1_load_data = {16'b0, dmem_rdata_b[31:16]};
+            end
+            default: slot1_load_data = dmem_rdata_b;
+        endcase
+    end
+
     assign slot1_wb_we   = id1_ex_valid && id1_ex_reg_write && !ex_redirect;
     assign slot1_wb_rd   = id1_ex_rd;
-    assign slot1_wb_data = slot1_alu_y;
+    assign slot1_wb_data = id1_ex_mem_read ? slot1_load_data : slot1_alu_y;
 
     // M3.4b: PRF 双写来源（保持旧 regfile 写回路径不变）
     assign prf_we0 = wb_we && (mem_wb_rd != 5'd0);
@@ -1226,7 +1301,7 @@ module cpu_top (
     wire [31:0] rob_wb_r0 = (mem_wb_wb_sel == `WB_MEM) ? mem_wb_load : mem_wb_alu_y;
     wire        rob_wb_v1 = id1_ex_valid && !ex_redirect;
     wire [3:0]  rob_wb_t1 = id1_ex_rob_tag;
-    wire [31:0] rob_wb_r1 = slot1_alu_y;
+    wire [31:0] rob_wb_r1 = slot1_wb_data;     // R4: LOAD 时为 sign-ext 后的 load data
 
     // commit pop：跟随 commit_valid（in-order 自然约束）
     wire [1:0]  rob_pop_cnt = (rob_commit_valid_0 ? 2'd1 : 2'd0)

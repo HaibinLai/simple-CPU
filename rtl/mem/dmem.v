@@ -16,11 +16,18 @@ module dmem #(
     parameter CACHE_LINES = 64
 )(
     input  wire        clk,
+    // Port A：原读写端口（slot0 load/store；slot1 store 暂不支持）
     input  wire [31:0] addr,
     input  wire        we,
     input  wire [3:0]  be,
     input  wire [31:0] wdata,
-    output wire [31:0] rdata
+    output wire [31:0] rdata,
+    // Port B：只读端口（供 slot1 load 在 EX1 组合读 D-Cache）
+    // 时序：addr_b 组合送入；rdata_b 在同 cycle 组合返回；
+    //       re_b=1 时纳入统计与 miss-on-fill；为 0 时不计入统计。
+    input  wire [31:0] addr_b,
+    input  wire        re_b,
+    output wire [31:0] rdata_b
 );
     localparam MEM_IDX_W   = $clog2(MEM_WORDS);
     localparam CACHE_IDX_W = $clog2(CACHE_LINES);
@@ -38,6 +45,10 @@ module dmem #(
     integer stat_access;
     integer stat_hit;
     integer stat_miss;
+    // Port B 统计（slot1 load 用）
+    integer stat_access_b;
+    integer stat_hit_b;
+    integer stat_miss_b;
 
     wire [CACHE_IDX_W-1:0] c_idx = addr[CACHE_IDX_W+1:2];
     wire [TAG_W-1:0]       c_tg  = addr[31:CACHE_IDX_W+2];
@@ -47,6 +58,14 @@ module dmem #(
     wire access = we || (be != 4'b0000);
 
     wire [31:0] src_word = hit ? c_data[c_idx] : mem[m_idx];
+
+    // ----- Port B (只读) -----
+    wire [CACHE_IDX_W-1:0] cb_idx = addr_b[CACHE_IDX_W+1:2];
+    wire [TAG_W-1:0]       cb_tg  = addr_b[31:CACHE_IDX_W+2];
+    wire [MEM_IDX_W-1:0]   mb_idx = addr_b[MEM_IDX_W+1:2];
+    wire hit_b = c_valid[cb_idx] && (c_tag[cb_idx] == cb_tg);
+    wire [31:0] srcb_word = hit_b ? c_data[cb_idx] : mem[mb_idx];
+    assign rdata_b = srcb_word;
 
     // 写掩码合并
     wire [31:0] be_mask = {
@@ -59,6 +78,9 @@ module dmem #(
         stat_access = 0;
         stat_hit    = 0;
         stat_miss   = 0;
+        stat_access_b = 0;
+        stat_hit_b    = 0;
+        stat_miss_b   = 0;
         for (i = 0; i < MEM_WORDS; i = i + 1) mem[i] = 32'h0;
         for (i = 0; i < CACHE_LINES; i = i + 1) begin
             c_valid[i] = 1'b0;
@@ -90,6 +112,21 @@ module dmem #(
 
             // 命中时更新 cache；未命中时由上面的写分配回填
             if (hit) c_data[c_idx] <= merged_word;
+        end
+
+        // ----- Port B 统计与回填（只读，不写主存）-----
+        // 若 Port A 与 Port B 同 cycle 都 miss 同一行，由 Port A 完成回填，
+        // 这里只在不冲突时回填，避免 race（行号相同优先 A 端）。
+        if (re_b) begin
+            stat_access_b <= stat_access_b + 1;
+            if (hit_b) stat_hit_b  <= stat_hit_b  + 1;
+            else       stat_miss_b <= stat_miss_b + 1;
+
+            if (!hit_b && !(access && !hit && (c_idx == cb_idx))) begin
+                c_valid[cb_idx] <= 1'b1;
+                c_tag[cb_idx]   <= cb_tg;
+                c_data[cb_idx]  <= mem[mb_idx];
+            end
         end
     end
 endmodule
