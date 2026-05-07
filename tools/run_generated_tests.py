@@ -25,6 +25,7 @@ RE_STALLS = re.compile(r"\[TB\]\s+stalls:\s+load_use=(\d+)\s+flush_br=(\d+)\s+fl
 RE_DUAL  = re.compile(r"\[TB\]\s+dual_issue=(\d+)\s+single_issue=(\d+)\s+dual_rate=([0-9.]+)")
 RE_PAIR  = re.compile(r"\[TB\]\s+pair_blk:\s+novalid1=(\d+)\s+unsafe0=(\d+)\s+notalu=(\d+)\s+raw=(\d+)\s+waw=(\d+)\s+loaduse=(\d+)\s+xcycwaw=(\d+)")
 RE_IFQ   = re.compile(r"\[TB\]\s+ifq:\s+full=(\d+)\s+almost_full=(\d+)")
+RE_NTA   = re.compile(r"\[TB\]\s+nta_brk:\s+load=(\d+)\s+store=(\d+)\s+branch=(\d+)\s+jump=(\d+)\s+other=(\d+)")
 
 
 def parse_rtl_regs(out: str):
@@ -116,6 +117,13 @@ def parse_metrics(out: str):
     if m_iq:
         metrics["ifq_full"]        = int(m_iq.group(1))
         metrics["ifq_almost_full"] = int(m_iq.group(2))
+    m_nt = RE_NTA.search(out)
+    if m_nt:
+        metrics["nta_load"]   = int(m_nt.group(1))
+        metrics["nta_store"]  = int(m_nt.group(2))
+        metrics["nta_branch"] = int(m_nt.group(3))
+        metrics["nta_jump"]   = int(m_nt.group(4))
+        metrics["nta_other"]  = int(m_nt.group(5))
     return metrics
 
 
@@ -342,7 +350,18 @@ def main():
         print("\n=== IFQ Pressure ===")
         print(f"  ifq_full         : {sum_ifq_full:>8}  ({pct(sum_ifq_full, sum_cycles)} of cycles)")
         print(f"  ifq_almost_full  : {sum_ifq_almost:>8}  ({pct(sum_ifq_almost, sum_cycles)})")
-
+        sum_nta_load   = sum(m.get("nta_load", 0)   for m in all_metrics)
+        sum_nta_store  = sum(m.get("nta_store", 0)  for m in all_metrics)
+        sum_nta_branch = sum(m.get("nta_branch", 0) for m in all_metrics)
+        sum_nta_jump   = sum(m.get("nta_jump", 0)   for m in all_metrics)
+        sum_nta_other  = sum(m.get("nta_other", 0)  for m in all_metrics)
+        nta_total = sum_nta_load + sum_nta_store + sum_nta_branch + sum_nta_jump + sum_nta_other
+        print("\n=== nta Breakdown (slot1 not-ALU class) ===")
+        print(f"  load             : {sum_nta_load:>8}  ({pct(sum_nta_load, nta_total)})")
+        print(f"  store            : {sum_nta_store:>8}  ({pct(sum_nta_store, nta_total)})")
+        print(f"  branch           : {sum_nta_branch:>8}  ({pct(sum_nta_branch, nta_total)})")
+        print(f"  jump (JAL/JALR)  : {sum_nta_jump:>8}  ({pct(sum_nta_jump, nta_total)})")
+        print(f"  other            : {sum_nta_other:>8}  ({pct(sum_nta_other, nta_total)})")
     if failed:
         print("\n=== Failure Samples ===")
         for rel, rc, out, diffs in failed[: args.max_fail_print]:

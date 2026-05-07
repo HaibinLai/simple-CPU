@@ -76,6 +76,11 @@ module tb_cpu;
     integer c_dual_issue        = 0;  // 真正双发射 cycle 数（slot0 & slot1 同时 issue）
     integer c_single_issue      = 0;  // 仅 slot0 单发射 cycle 数
     integer c_pair_blk_notalu   = 0;  // slot1 非 ALU-only
+    integer c_nta_load    = 0;       // notalu breakdown
+    integer c_nta_store   = 0;
+    integer c_nta_branch  = 0;
+    integer c_nta_jump    = 0;
+    integer c_nta_other   = 0;       // ecall / mret / illegal
     integer c_pair_blk_raw      = 0;  // slot0->slot1 RAW
     integer c_pair_blk_waw      = 0;  // 同 cycle WAW
     integer c_pair_blk_loaduse  = 0;  // slot1 依赖 in-flight load
@@ -113,7 +118,11 @@ module tb_cpu;
     wire dut_pop0           = u_dut.ifq_pop_slot0;
     wire dut_pop1           = u_dut.ifq_pop_slot1;
     wire dut_id1_valid1     = u_dut.id1_id2_valid1;
-    wire dut_id1_alu_only   = u_dut.id1_is_alu_only;
+    wire dut_id1_alu_only   = u_dut.id1_is_pairable;  // R3: 已扩展为 pairable
+    wire dut_id1_mem_read   = u_dut.id1_mem_read;
+    wire dut_id1_mem_write  = u_dut.id1_mem_write;
+    wire [2:0] dut_id1_brt  = u_dut.id1_br_type;
+    wire dut_id1_is_jmp     = u_dut.id1_is_jump;
     wire dut_id1_no_raw     = u_dut.id1_no_raw_hazard;
     wire dut_id1_no_waw     = u_dut.id1_no_waw_hazard;
     wire dut_id1_no_lu      = u_dut.id1_no_load_use_hazard;
@@ -259,7 +268,14 @@ module tb_cpu;
             if (dut_pop0 && !dut_pop1) begin
                 if      (!dut_id1_valid1)   c_pair_blk_novalid1 <= c_pair_blk_novalid1 + 1;
                 else if (!dut_slot0_safe)   c_pair_blk_unsafe0  <= c_pair_blk_unsafe0  + 1;
-                else if (!dut_id1_alu_only) c_pair_blk_notalu   <= c_pair_blk_notalu   + 1;
+                else if (!dut_id1_alu_only) begin
+                    c_pair_blk_notalu <= c_pair_blk_notalu + 1;
+                    if      (dut_id1_mem_read)        c_nta_load   <= c_nta_load   + 1;
+                    else if (dut_id1_mem_write)       c_nta_store  <= c_nta_store  + 1;
+                    else if (dut_id1_brt != 3'b000)   c_nta_branch <= c_nta_branch + 1;
+                    else if (dut_id1_is_jmp)          c_nta_jump   <= c_nta_jump   + 1;
+                    else                              c_nta_other  <= c_nta_other  + 1;
+                end
                 else if (!dut_id1_no_raw)   c_pair_blk_raw      <= c_pair_blk_raw      + 1;
                 else if (!dut_id1_no_waw)   c_pair_blk_waw      <= c_pair_blk_waw      + 1;
                 else if (!dut_id1_no_lu)    c_pair_blk_loaduse  <= c_pair_blk_loaduse  + 1;
@@ -336,6 +352,8 @@ module tb_cpu;
             $display("[TB] pair_blk: novalid1=%0d unsafe0=%0d notalu=%0d raw=%0d waw=%0d loaduse=%0d xcycwaw=%0d",
                      c_pair_blk_novalid1, c_pair_blk_unsafe0, c_pair_blk_notalu,
                      c_pair_blk_raw, c_pair_blk_waw, c_pair_blk_loaduse, c_pair_blk_xcycwaw);
+            $display("[TB] nta_brk: load=%0d store=%0d branch=%0d jump=%0d other=%0d",
+                     c_nta_load, c_nta_store, c_nta_branch, c_nta_jump, c_nta_other);
             $display("[TB] ifq: full=%0d almost_full=%0d",
                      c_ifq_full, c_ifq_almost_full);
         end

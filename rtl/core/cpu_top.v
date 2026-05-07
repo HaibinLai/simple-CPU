@@ -332,6 +332,9 @@ module cpu_top (
     // （LUI/AUIPC 是单加法 / bypass，不访存，不重定向）
     wire id1_is_alu_only = (id1_opcode == `OP_REG)  || (id1_opcode == `OP_IMM) ||
                            (id1_opcode == `OP_LUI)  || (id1_opcode == `OP_AUIPC);
+    // R3 扩展：条件分支（在 EX1 解析，隐式预测 not-taken）也可进入 slot1。
+    wire id1_is_branch_op = (id1_opcode == `OP_BRANCH);
+    wire id1_is_pairable  = id1_is_alu_only || id1_is_branch_op;
 
     // Slot1 control 解码（仅供约束检查；暂不用于执行）
     wire [2:0] id1_imm_type;
@@ -364,10 +367,11 @@ module cpu_top (
     );
 
     // Slot1 配对约束（仅依赖 ID 阶段信号；in-flight load 检查在 id_ex 声明后做）：
-    // 1. Slot1 有效 && 是 ALU-only 指令
+    // 1. Slot1 有效 && 是 可配对 指令 (ALU-only 或 条件分支)
     // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
-    wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM);
-    wire slot1_rs2_used = (id1_opcode == `OP_REG);
+    wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM) ||
+                          (id1_opcode == `OP_BRANCH);
+    wire slot1_rs2_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_BRANCH);
     // LUI/AUIPC 不读寄存器，不参与 RAW/load-use 检查
 
     wire id1_no_raw_hazard = ~(
@@ -401,7 +405,7 @@ module cpu_top (
     wire id_slot0_safe_for_pair = 1'b1;
 
     // Slot1 issue 条件
-    assign id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only &&
+    assign id2_issue_slot1 = id1_id2_valid1 && id1_is_pairable &&
                              id_slot0_safe_for_pair &&
                              id1_no_raw_hazard && id1_no_waw_hazard &&
                              id1_no_load_use_hazard && id1_no_xcycle_waw;
@@ -516,6 +520,7 @@ module cpu_top (
     reg [1:0]  id1_ex_wb_sel;
     reg        id1_ex_valid;
     reg [2:0]  id1_ex_imm_type;
+    reg [2:0]  id1_ex_br_type;       // R3: 支持 slot1 = 条件分支
     reg [3:0]  id1_ex_rob_tag;
     reg [5:0]  id1_ex_rd_ptag;
     reg [5:0]  id1_ex_rs1_ptag, id1_ex_rs2_ptag;
@@ -608,6 +613,7 @@ module cpu_top (
             id1_ex_wb_sel     <= `WB_ALU;
             id1_ex_valid      <= 1'b0;
             id1_ex_imm_type   <= `IMM_NONE;
+            id1_ex_br_type    <= `BR_NONE;
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
@@ -617,6 +623,7 @@ module cpu_top (
             id1_ex_rd         <= 5'b0;
             id1_ex_reg_write  <= 1'b0;
             id1_ex_valid      <= 1'b0;
+            id1_ex_br_type    <= `BR_NONE;
         end else begin
             id1_ex_pc         <= id1_id2_pc1;
             id1_ex_instr      <= id1_instr;
@@ -633,6 +640,7 @@ module cpu_top (
             id1_ex_wb_sel     <= id1_wb_sel;
             id1_ex_valid      <= id2_issue_slot1;     // 仅当 slot1 满足配对条件时，流水线才推进
             id1_ex_imm_type   <= id1_imm_type;
+            id1_ex_br_type    <= id1_br_type;
             id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
             id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
             id1_ex_rs1_ptag   <= rn_s1_rs1_ptag;       // M3.4c: 携带 rs ptag
@@ -805,7 +813,22 @@ module cpu_top (
         .y  (slot1_alu_y)
     );
 
-    // Slot1 分支判断使用前递后的 rs1/rs2（仅用于验证，slot1 不会有分支）
+    // Slot1 分支判断使用前递后的 rs1/rs2
+    wire slot1_br_taken;
+    branch_unit u_bu_slot1 (
+        .br_type (id1_ex_br_type),
+        .is_jump (1'b0),                 // slot1 不接受 JAL/JALR（需 redirect+rd 写）
+        .rs1     (slot1_rs1_fwd),
+        .rs2     (slot1_rs2_fwd),
+        .taken   (slot1_br_taken)
+    );
+
+    wire slot1_is_branch_ex = id1_ex_valid && (id1_ex_br_type != `BR_NONE);
+    wire [31:0] slot1_br_target = id1_ex_pc + slot1_imm;
+    // slot1 分支隐式预测 not-taken（IF 阶段 BPU 仅给 slot0；若 BPU 预测 taken，
+    // slot1 已在 IF 时被 if_id_valid1 = ~bpu_pred_taken 丢弃）。
+    // 因此：slot1 实际 taken == 错预测；实际 not-taken == 命中。
+    wire slot1_mispredict = slot1_is_branch_ex && slot1_br_taken;
     
     // 分支判断使用前递后的 rs1/rs2
     wire ex_br_taken;
@@ -837,16 +860,26 @@ module cpu_top (
             (!ex_br_taken &&  id_ex_pred_taken)
         );
 
-    assign ex_redirect    = ex_is_exception || ex_is_mret_inst || ex_mispredict;
+    // R3: slot0 优先级高于 slot1（slot0 是 program order 中较早的指令）。
+    //   * slot0 redirect → ex_redirect_pc 使用 slot0 路径；slot1 在同 cycle 已被 gate 杀掉。
+    //   * slot0 不 redirect 但 slot1 mispredict → 使用 slot1 redirect 至 slot1 分支目标。
+    wire ex_redirect_slot0 = ex_is_exception || ex_is_mret_inst || ex_mispredict;
+    wire ex_redirect_slot1 = !ex_redirect_slot0 && slot1_mispredict;
+
+    assign ex_redirect    = ex_redirect_slot0 || ex_redirect_slot1;
     assign ex_redirect_pc = ex_is_exception ? csr_mtvec :
                             ex_is_mret_inst ? csr_mepc :
-                            (ex_br_taken ? ex_actual_target : (id_ex_pc + 32'd4));
+                            ex_mispredict   ? (ex_br_taken ? ex_actual_target : (id_ex_pc + 32'd4)) :
+                            /* slot1 mispredict */ slot1_br_target;
 
     // BPU 训练反馈
-    assign bpu_upd_valid  = ex_is_branch;
-    assign bpu_upd_pc     = id_ex_pc;
-    assign bpu_upd_taken  = ex_br_taken;
-    assign bpu_upd_target = ex_actual_target;
+    //   * slot0 是分支 → 用 slot0 训练（同 cycle 若 slot1 也是分支，丢弃 slot1 训练；
+    //     发生概率低，可接受）。
+    //   * 否则若 slot1 是分支 → 用 slot1 训练。
+    assign bpu_upd_valid  = ex_is_branch || slot1_is_branch_ex;
+    assign bpu_upd_pc     = ex_is_branch ? id_ex_pc          : id1_ex_pc;
+    assign bpu_upd_taken  = ex_is_branch ? ex_br_taken       : slot1_br_taken;
+    assign bpu_upd_target = ex_is_branch ? ex_actual_target  : slot1_br_target;
 
     // CSR 写入：异常入口记录 mepc/mcause；mret 只做跳转
     always @(posedge clk or negedge rst_n) begin
@@ -1184,7 +1217,8 @@ module cpu_top (
     wire        rob_alloc_st_0_w = id_mem_write;
     wire        rob_alloc_st_1_w = 1'b0;        // slot1 不会是 store
     wire        rob_alloc_br_0_w = (id_br_type != `BR_NONE) || id_is_jump;
-    wire        rob_alloc_br_1_w = 1'b0;        // slot1 不会是 branch
+    // R3: slot1 可以是条件分支
+    wire        rob_alloc_br_1_w = id1_is_branch_op;
 
     // writeback：slot0 在 mem_wb 阶段；slot1 在 EX1 阶段
     wire        rob_wb_v0 = mem_wb_valid;
