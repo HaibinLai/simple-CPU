@@ -1,22 +1,26 @@
 // =============================================================
-// bpu.v — 分支预测单元 (BTB + BHT)
+// bpu.v — 分支预测单元 (BTB 2-way + GShare BHT)
 //
-//   BTB : 16 项直接映射，索引 = pc[5:2]
-//         tag = pc[31:6]，存储跳转目标地址
-//   BHT : 64 项 2-bit 饱和计数器，索引 = pc[7:2]
-//         11 / 10 = predict taken；01 / 00 = not taken
+//   BTB : 32 set x 2 way = 64 项；index = pc[6:2]；
+//         tag = pc[31:7]；每 set 一个 LRU bit
+//   BHT : 256 项 2-bit 饱和计数器；
+//         index = pc[9:2] XOR ghr[7:0]   (GShare)
+//   GHR : 8-bit 全局分支历史寄存器；EX 解析每条分支后左移并填入实际方向
 //
-//   IF 阶段：用 PC 同时查 BTB / BHT
-//     - btb_hit && counter >= 2 → predict taken（输出 BTB 目标）
-//     - 否则 → predict not-taken（IF 走 PC+4）
+//   IF 阶段：
+//     btb_hit = 任一 way tag 匹配
+//     pred_taken  = btb_hit && bht_counter[1]
+//     pred_target = 命中那 way 的 target
 //
-//   EX 阶段（后端）反馈分支真实结果，本模块同步更新：
-//     - BHT：朝真实方向饱和移动
-//     - BTB：taken 时分配/更新表项；not-taken 时不动 BTB
+//   EX 阶段反馈：
+//     - BHT：朝实际方向饱和移动（用当前 GHR 重算 index）
+//     - BTB：taken 时分配/更新（LRU way 替换）；not-taken 不动
+//     - GHR：左移并写入 upd_taken
 // =============================================================
 module bpu #(
-    parameter BHT_IDX_W = 6,   // 64 项
-    parameter BTB_IDX_W = 4    // 16 项
+    parameter BHT_IDX_W = 8,    // 256
+    parameter BTB_IDX_W = 5,    // 32 sets
+    parameter GHR_W     = 8
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -32,42 +36,70 @@ module bpu #(
     input  wire        upd_taken,
     input  wire [31:0] upd_target
 );
-    localparam BHT_SIZE = 1 << BHT_IDX_W;
-    localparam BTB_SIZE = 1 << BTB_IDX_W;
+    localparam BHT_SIZE  = 1 << BHT_IDX_W;
+    localparam BTB_SETS  = 1 << BTB_IDX_W;
     localparam BTB_TAG_W = 32 - BTB_IDX_W - 2;
 
+    // ----- BHT (GShare) -----
     reg [1:0] bht [0:BHT_SIZE-1];
 
-    reg                  btb_valid  [0:BTB_SIZE-1];
-    reg [BTB_TAG_W-1:0]  btb_tag    [0:BTB_SIZE-1];
-    reg [31:0]           btb_target [0:BTB_SIZE-1];
+    // ----- BTB 2-way -----
+    reg                  btb0_valid  [0:BTB_SETS-1];
+    reg [BTB_TAG_W-1:0]  btb0_tag    [0:BTB_SETS-1];
+    reg [31:0]           btb0_target [0:BTB_SETS-1];
+    reg                  btb1_valid  [0:BTB_SETS-1];
+    reg [BTB_TAG_W-1:0]  btb1_tag    [0:BTB_SETS-1];
+    reg [31:0]           btb1_target [0:BTB_SETS-1];
+    reg                  btb_lru     [0:BTB_SETS-1]; // 0: way0 LRU; 1: way1 LRU
+
+    // ----- GHR -----
+    reg [GHR_W-1:0] ghr;
 
     integer i;
     initial begin
-        for (i = 0; i < BHT_SIZE; i = i + 1) bht[i] = 2'b01;     // 弱不跳
-        for (i = 0; i < BTB_SIZE; i = i + 1) btb_valid[i]  = 1'b0;
+        for (i = 0; i < BHT_SIZE; i = i + 1) bht[i] = 2'b01;
+        for (i = 0; i < BTB_SETS; i = i + 1) begin
+            btb0_valid[i] = 1'b0;
+            btb1_valid[i] = 1'b0;
+            btb_lru[i]    = 1'b0;
+        end
     end
 
-    // -------- 预测 --------
-    wire [BHT_IDX_W-1:0] if_bht_idx = if_pc[BHT_IDX_W+1:2];
+    // -------- 预测 (IF) --------
     wire [BTB_IDX_W-1:0] if_btb_idx = if_pc[BTB_IDX_W+1:2];
     wire [BTB_TAG_W-1:0] if_btb_tag = if_pc[31:BTB_IDX_W+2];
 
-    wire btb_hit = btb_valid[if_btb_idx] && (btb_tag[if_btb_idx] == if_btb_tag);
+    wire if_hit0 = btb0_valid[if_btb_idx] && (btb0_tag[if_btb_idx] == if_btb_tag);
+    wire if_hit1 = btb1_valid[if_btb_idx] && (btb1_tag[if_btb_idx] == if_btb_tag);
+    wire btb_hit = if_hit0 | if_hit1;
+
+    // GShare BHT 索引: pc[9:2] XOR ghr
+    wire [BHT_IDX_W-1:0] if_pc_idx  = if_pc[BHT_IDX_W+1:2];
+    // 暂时禁用 GShare（缺 IF→EX GHR snapshot，会训练到错误索引）
+    wire [BHT_IDX_W-1:0] if_bht_idx = if_pc_idx;
     wire bht_taken = bht[if_bht_idx][1];
 
     assign pred_taken  = btb_hit && bht_taken;
-    assign pred_target = btb_target[if_btb_idx];
+    assign pred_target = if_hit0 ? btb0_target[if_btb_idx] : btb1_target[if_btb_idx];
 
     // -------- 训练 --------
-    wire [BHT_IDX_W-1:0] upd_bht_idx = upd_pc[BHT_IDX_W+1:2];
     wire [BTB_IDX_W-1:0] upd_btb_idx = upd_pc[BTB_IDX_W+1:2];
     wire [BTB_TAG_W-1:0] upd_btb_tag = upd_pc[31:BTB_IDX_W+2];
+    wire [BHT_IDX_W-1:0] upd_pc_idx  = upd_pc[BHT_IDX_W+1:2];
+    wire [BHT_IDX_W-1:0] upd_bht_idx = upd_pc_idx;
+
+    wire u_hit0 = btb0_valid[upd_btb_idx] && (btb0_tag[upd_btb_idx] == upd_btb_tag);
+    wire u_hit1 = btb1_valid[upd_btb_idx] && (btb1_tag[upd_btb_idx] == upd_btb_tag);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < BHT_SIZE; i = i + 1) bht[i] <= 2'b01;
-            for (i = 0; i < BTB_SIZE; i = i + 1) btb_valid[i]  <= 1'b0;
+            for (i = 0; i < BTB_SETS; i = i + 1) begin
+                btb0_valid[i] <= 1'b0;
+                btb1_valid[i] <= 1'b0;
+                btb_lru[i]    <= 1'b0;
+            end
+            ghr <= {GHR_W{1'b0}};
         end else if (upd_valid) begin
             // BHT 饱和更新
             if (upd_taken) begin
@@ -78,12 +110,44 @@ module bpu #(
                     bht[upd_bht_idx] <= bht[upd_bht_idx] - 2'b01;
             end
 
-            // BTB：taken 时分配/更新（not-taken 不动）
+            // BTB：taken 时更新或分配（LRU 替换），not-taken 不动
             if (upd_taken) begin
-                btb_valid [upd_btb_idx] <= 1'b1;
-                btb_tag   [upd_btb_idx] <= upd_btb_tag;
-                btb_target[upd_btb_idx] <= upd_target;
+                if (u_hit0) begin
+                    btb0_target[upd_btb_idx] <= upd_target;
+                    btb_lru[upd_btb_idx]     <= 1'b1; // way0 MRU -> way1 LRU
+                end else if (u_hit1) begin
+                    btb1_target[upd_btb_idx] <= upd_target;
+                    btb_lru[upd_btb_idx]     <= 1'b0;
+                end else begin
+                    // 分配：优先填空 way；都满则替换 LRU
+                    if (!btb0_valid[upd_btb_idx]) begin
+                        btb0_valid [upd_btb_idx] <= 1'b1;
+                        btb0_tag   [upd_btb_idx] <= upd_btb_tag;
+                        btb0_target[upd_btb_idx] <= upd_target;
+                        btb_lru    [upd_btb_idx] <= 1'b1;
+                    end else if (!btb1_valid[upd_btb_idx]) begin
+                        btb1_valid [upd_btb_idx] <= 1'b1;
+                        btb1_tag   [upd_btb_idx] <= upd_btb_tag;
+                        btb1_target[upd_btb_idx] <= upd_target;
+                        btb_lru    [upd_btb_idx] <= 1'b0;
+                    end else if (btb_lru[upd_btb_idx] == 1'b0) begin
+                        // way0 LRU
+                        btb0_valid [upd_btb_idx] <= 1'b1;
+                        btb0_tag   [upd_btb_idx] <= upd_btb_tag;
+                        btb0_target[upd_btb_idx] <= upd_target;
+                        btb_lru    [upd_btb_idx] <= 1'b1;
+                    end else begin
+                        // way1 LRU
+                        btb1_valid [upd_btb_idx] <= 1'b1;
+                        btb1_tag   [upd_btb_idx] <= upd_btb_tag;
+                        btb1_target[upd_btb_idx] <= upd_target;
+                        btb_lru    [upd_btb_idx] <= 1'b0;
+                    end
+                end
             end
+
+            // GHR 更新：左移 + upd_taken 进入
+            ghr <= {ghr[GHR_W-2:0], upd_taken};
         end
     end
 endmodule

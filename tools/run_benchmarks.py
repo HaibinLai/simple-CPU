@@ -29,6 +29,8 @@ RE_STL = re.compile(r"\[TB\] stalls: load_use=(\d+)\s+flush_br=(\d+)\s+flush_jum
 RE_BR = re.compile(r"\[TB\] branches=(\d+)\s+mispredicts=(\d+)\s+miss_rate=([\d.]+)")
 RE_IC = re.compile(r"\[TB\] I\$ access=(\d+) hit=(\d+) miss=(\d+) miss_rate=([\d.]+)")
 RE_DC = re.compile(r"\[TB\] D\$ access=(\d+) hit=(\d+) miss=(\d+) miss_rate=([\d.]+)")
+RE_DUAL = re.compile(r"\[TB\] dual_issue=(\d+) single_issue=(\d+) dual_rate=([\d.]+)")
+RE_PAIR = re.compile(r"\[TB\] pair_blk: novalid1=(\d+) unsafe0=(\d+) notalu=(\d+) raw=(\d+) waw=(\d+) loaduse=(\d+) xcycwaw=(\d+)")
 
 
 @dataclass
@@ -49,6 +51,15 @@ class BenchResult:
     br_miss_rate: Optional[float] = None
     ic_miss_rate: Optional[float] = None
     dc_miss_rate: Optional[float] = None
+    dual: Optional[int] = None
+    single: Optional[int] = None
+    pblk_nv1: Optional[int] = None
+    pblk_un0: Optional[int] = None
+    pblk_nta: Optional[int] = None
+    pblk_raw: Optional[int] = None
+    pblk_waw: Optional[int] = None
+    pblk_lu: Optional[int] = None
+    pblk_xww: Optional[int] = None
     raw_tail: str = ""
 
 
@@ -80,6 +91,19 @@ def parse_output(out: str) -> BenchResult:
     m = RE_DC.search(out)
     if m:
         res.dc_miss_rate = float(m.group(4))
+    m = RE_DUAL.search(out)
+    if m:
+        res.dual = int(m.group(1))
+        res.single = int(m.group(2))
+    m = RE_PAIR.search(out)
+    if m:
+        res.pblk_nv1 = int(m.group(1))
+        res.pblk_un0 = int(m.group(2))
+        res.pblk_nta = int(m.group(3))
+        res.pblk_raw = int(m.group(4))
+        res.pblk_waw = int(m.group(5))
+        res.pblk_lu  = int(m.group(6))
+        res.pblk_xww = int(m.group(7))
     res.raw_tail = "\n".join(out.strip().splitlines()[-15:])
     return res
 
@@ -206,6 +230,23 @@ def main() -> None:
     print_table(results)
 
     failed = [r for r in results if not r.passed]
+
+    # === Issue / Pair-Block Breakdown ===
+    print()
+    print("=== Issue Width & Pair-Block Reasons ===")
+    h2 = ("benchmark           dual%   nv1%   un0%   nta%   raw%   waw%    lu%   xww%")
+    print(h2)
+    print("-" * len(h2))
+    for r in results:
+        if r.dual is None:
+            continue
+        tot = (r.dual or 0) + (r.single or 0)
+        s   = max(r.single or 0, 1)
+        def p(x):
+            return f"{(100.0*x/s):5.1f}" if x is not None else "  -  "
+        dr = (100.0*(r.dual or 0)/tot) if tot else 0.0
+        print(f"{r.name:<18}  {dr:5.1f}  {p(r.pblk_nv1)}  {p(r.pblk_un0)}  {p(r.pblk_nta)}  {p(r.pblk_raw)}  {p(r.pblk_waw)}  {p(r.pblk_lu)}  {p(r.pblk_xww)}")
+
     if failed:
         print("\n=== Failure Tails ===")
         for r in failed:

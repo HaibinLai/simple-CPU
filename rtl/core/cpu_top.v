@@ -389,14 +389,16 @@ module cpu_top (
     // R2 BUG#5: cross-cycle WAW（在 id_ex/ex_mem/... 声明之后定义）
     wire id1_no_xcycle_waw;
 
-    // R2 BUG#4 修复：slot0 必须是"无副作用 / 无重定向" 的指令，才允许 slot1 配对。
-    // 否则 slot0 mispredict/exception 时 slot1 已经写回 regfile，无法撤销。
-    // R3 放宽：允许 slot0 是 store（store 不修改控制流，不会触发 ex_redirect；
-    //   store 没有 rd，因此不会与 slot1 形成 WAW；slot1 与 store 内存无序也无影响，
-    //   因为 slot1 是 ALU-only 不访存）。
-    wire id_slot0_safe_for_pair = (id_br_type == `BR_NONE) && !id_is_jump &&
-                                   !id_is_ecall && !id_is_mret && !id_is_illegal;
-                                   // 注：去掉 !id_mem_write，允许 store 配对
+    // R3 放宽：允许 slot0 为 branch / JAL / JALR / ecall / mret / illegal。
+    // 详细推导：
+    //   * BPU 预测 taken 时，if_id_valid1 = ~bpu_pred_taken 会丢掉 slot1，
+    //     所以 slot1 只可能与「预测不跳」的 slot0 配对；
+    //   * 若 slot0 预测错误 / JAL/JALR BTB miss / 异常 / mret → ex_redirect，
+    //     此时同 cycle gate slot1_wb_we / prf_we1 / rob_wb_v1 以丢掉错误路径 slot1。
+    //   * Same-cycle WAW 仍由 id1_no_waw_hazard 拦截（e.g. JAL.rd == slot1.rd）。
+    //   * Cross-cycle WAW 仍由 id1_no_xcycle_waw 拦截。
+    //   * Store 依然允许（原本已放宽）。
+    wire id_slot0_safe_for_pair = 1'b1;
 
     // Slot1 issue 条件
     assign id2_issue_slot1 = id1_id2_valid1 && id1_is_alu_only &&
@@ -1067,7 +1069,9 @@ module cpu_top (
     // ===== Milestone 2 Phase R2: Slot1 Direct Write-Back (ENABLED) =====
     // PC 已升级为 +8 推进 + IFQ 双 pop，避免重复执行问题。
     // Slot1 在 EX1 阶段直接写回 regfile（ALU-only，无需 EX2/AGU/MEM）
-    assign slot1_wb_we   = id1_ex_valid && id1_ex_reg_write;
+    // R3: 当同 cycle slot0 (paired) 触发 ex_redirect（mispredict/exc/mret）时
+    //     slot1 是错误路径，必须 kill WB / PRF write / ROB writeback。
+    assign slot1_wb_we   = id1_ex_valid && id1_ex_reg_write && !ex_redirect;
     assign slot1_wb_rd   = id1_ex_rd;
     assign slot1_wb_data = slot1_alu_y;
 
@@ -1186,7 +1190,7 @@ module cpu_top (
     wire        rob_wb_v0 = mem_wb_valid;
     wire [3:0]  rob_wb_t0 = mem_wb_rob_tag;
     wire [31:0] rob_wb_r0 = (mem_wb_wb_sel == `WB_MEM) ? mem_wb_load : mem_wb_alu_y;
-    wire        rob_wb_v1 = id1_ex_valid;
+    wire        rob_wb_v1 = id1_ex_valid && !ex_redirect;
     wire [3:0]  rob_wb_t1 = id1_ex_rob_tag;
     wire [31:0] rob_wb_r1 = slot1_alu_y;
 
