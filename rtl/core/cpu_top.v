@@ -1158,29 +1158,33 @@ module cpu_top (
     assign slot1_wb_rd   = id1_ex_rd;
     assign slot1_wb_data = id1_ex_mem_read ? slot1_load_data : slot1_alu_y;
 
-    // OoO Stage 1: PRF 等价于 regfile (32 entries)。
-    // 把 we0/we1 的目标地址改为 arch idx ({1'b0, rd})，读地址改为 arch rs，
-    // PRF[0..31] 时刻镜像 regfile[0..31]。spec ptag (32..47) 与 commit 写
-    // (we2/we3) 在 Stage 1 暂停，等 Stage 2/3 真正引入 ptag 转发后再启用。
+    // OoO Stage 1-bis (step1): PRF dual-write — wb 同时写 arch_idx 和 spec ptag。
+    //   we0/we1 写 arch idx (= Stage 2 行为，保证 PRF[0..31] 始终镜像架构态，
+    //                       即便 ROB flush 也不丢 wb-done 的值)。
+    //   we2/we3 写 spec ptag (新增)，让 PRF[ptag] 也持有 wb 后的值，为 step2
+    //                       切换读端口到 spec ptag 做准备。
+    //   spec_ptag == arch_idx 时（identity 映射，未 rename），跳过 we2/we3 避免重写。
+    //   读端口本步保持 arch idx（行为零变化），下一 commit 切到 spec ptag。
     assign prf_we0 = wb_we && (mem_wb_rd != 5'd0);
     assign prf_wa0 = {1'b0, mem_wb_rd};
     assign prf_wd0 = wb_data;
     assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
     assign prf_wa1 = {1'b0, id1_ex_rd};
     assign prf_wd1 = slot1_wb_data;
-    // 读地址：直接用 arch rs 索引；map[] 在 Stage 1 不参与数据通路。
+    // 读地址：暂保持 arch idx（step1 实际验证）。
+    // 切到 spec ptag 仍有未解决的 rename-map 可见性 race，留待后续。
     assign prf_ra0 = {1'b0, id_ex_rs1_addr};
     assign prf_ra1 = {1'b0, id_ex_rs2_addr};
     assign prf_ra2 = {1'b0, id1_ex_rs1_addr};
     assign prf_ra3 = {1'b0, id1_ex_rs2_addr};
 
-    // Stage 1: 暂停 commit 端的 PRF 写（与 we0/we1 重复且优先级混乱）。
-    assign prf_we2 = 1'b0;
-    assign prf_wa2 = 6'd0;
-    assign prf_wd2 = 32'd0;
-    assign prf_we3 = 1'b0;
-    assign prf_wa3 = 6'd0;
-    assign prf_wd3 = 32'd0;
+    // we2/we3: 镜像写到 spec ptag。
+    assign prf_we2 = prf_we0 && (mem_wb_rd_ptag != {1'b0, mem_wb_rd});
+    assign prf_wa2 = mem_wb_rd_ptag;
+    assign prf_wd2 = wb_data;
+    assign prf_we3 = prf_we1 && (id1_ex_rd_ptag != {1'b0, id1_ex_rd});
+    assign prf_wa3 = id1_ex_rd_ptag;
+    assign prf_wd3 = slot1_wb_data;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;

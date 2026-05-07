@@ -76,7 +76,13 @@ module rename #(
     wire [PTAG_W-1:0] s0_map_rd  = (s0_rd  == 5'd0) ? {PTAG_W{1'b0}} : map[s0_rd];
 
     wire [PTAG_W-1:0] s0_new = fl_mem[fl_head];
-    wire [PTAG_W-1:0] s1_new = fl_mem[(fl_head + 5'd1) % SPEC_CNT];
+    // BUG-FIX (OoO Stage 1-bis step2): 当 slot0 不 alloc 但 slot1 alloc 时
+    // (alloc0_ok=0, alloc1_ok=1)，fl_head 只前进 1，slot1 必须拿 fl_mem[fl_head]
+    // 而不是 fl_mem[fl_head+1]，否则 fl_head 推进后下个周期会复用同一个 ptag。
+    // 用 s0_real_alloc (= s0_alloc && rd!=0) 判断 slot0 是否真的会消耗 fl_head。
+    wire              s0_will_pop = s0_alloc && (s0_rd != 5'd0);
+    wire [PTAG_W-1:0] s1_new = s0_will_pop ? fl_mem[(fl_head + 5'd1) % SPEC_CNT]
+                                           : fl_mem[fl_head];
 
     wire s1_rs1_eq_s0_rd = s0_alloc && (s0_rd != 5'd0) && (s1_rs1 == s0_rd);
     wire s1_rs2_eq_s0_rd = s0_alloc && (s0_rd != 5'd0) && (s1_rs2 == s0_rd);
