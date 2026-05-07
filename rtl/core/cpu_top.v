@@ -779,16 +779,21 @@ module cpu_top (
                                  (agu_mem_rd == id_ex_rs2_addr);
 
     // 前递后的 rs1/rs2（这是“逐表达式中的真实寄存器值”）
+    // OoO Stage 1: baseline operand source 由 regfile-cached `id_ex_rs*` 切到
+    // PRF[id_ex_rs*_ptag]（prf_r0/prf_r1）。forwarding 命中时仍由相应流水线寄存器
+    // 提供 in-flight 值，PRF 仅作为 baseline（producer 已经 WB 或仍是架构值）。
+    wire [31:0] ex_rs1_base = prf_r0;
+    wire [31:0] ex_rs2_base = prf_r1;
     wire [31:0] ex_rs1_fwd =
         (fwd_a == 2'b01) ? ex_mem_alu_y :
         (fwd_a == 2'b10) ? ex2_agu_alu_y :
         (fwd_a == 2'b11) ? (fwd_a_from_agu ? agu_mem_fwd_data : wb_data) :
-                           id_ex_rs1;
+                           ex_rs1_base;
     wire [31:0] ex_rs2_fwd =
         (fwd_b == 2'b01) ? ex_mem_alu_y :
         (fwd_b == 2'b10) ? ex2_agu_alu_y :
         (fwd_b == 2'b11) ? (fwd_b_from_agu ? agu_mem_fwd_data : wb_data) :
-                           id_ex_rs2;
+                           ex_rs2_base;
 
     wire [31:0] ex_a = (id_ex_a_src == `ASRC_PC ) ? id_ex_pc  : ex_rs1_fwd;
     wire [31:0] ex_b = (id_ex_b_src == `BSRC_IMM) ? id_ex_imm : ex_rs2_fwd;
@@ -805,20 +810,23 @@ module cpu_top (
     // Slot1 forwarding: 完整的 forwarding 网络，与 slot0 同等
     // 优先级（最近的 in-flight 优先）：id_ex (slot0 同 cycle EX) > ex_mem > ex2_agu > agu_mem > mem_wb
     // slot1 没有 load 数据来源，但 load 依赖已被配对规则禁止（id1_no_load_use_hazard）
+    // OoO Stage 1: baseline operand source 切到 PRF[id1_ex_rs*_ptag] = prf_r2/prf_r3
+    wire [31:0] slot1_rs1_base = prf_r2;
+    wire [31:0] slot1_rs2_base = prf_r3;
     wire [31:0] slot1_rs1_fwd =
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
         (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
-                           id1_ex_rs1;
+                           slot1_rs1_base;
     wire [31:0] slot1_rs2_fwd =
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
         (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
-                           id1_ex_rs2;
+                           slot1_rs2_base;
 
     // Slot1 ALU input (ALU-only, so a_src is always RS1, b_src is IMM or RS2)
     // For ALU-only, imm_gen output can be reused or computed on-the-fly
@@ -1183,27 +1191,29 @@ module cpu_top (
     assign slot1_wb_rd   = id1_ex_rd;
     assign slot1_wb_data = id1_ex_mem_read ? slot1_load_data : slot1_alu_y;
 
-    // M3.4b: PRF 双写来源（保持旧 regfile 写回路径不变）
+    // OoO Stage 1: PRF 等价于 regfile (32 entries)。
+    // 把 we0/we1 的目标地址改为 arch idx ({1'b0, rd})，读地址改为 arch rs，
+    // PRF[0..31] 时刻镜像 regfile[0..31]。spec ptag (32..47) 与 commit 写
+    // (we2/we3) 在 Stage 1 暂停，等 Stage 2/3 真正引入 ptag 转发后再启用。
     assign prf_we0 = wb_we && (mem_wb_rd != 5'd0);
-    assign prf_wa0 = mem_wb_rd_ptag;
+    assign prf_wa0 = {1'b0, mem_wb_rd};
     assign prf_wd0 = wb_data;
     assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
-    assign prf_wa1 = id1_ex_rd_ptag;
+    assign prf_wa1 = {1'b0, id1_ex_rd};
     assign prf_wd1 = slot1_wb_data;
-    // M3.4c: PRF 读地址由 EX 阶段的 rs ptag 驱动
-    assign prf_ra0 = id_ex_rs1_ptag;
-    assign prf_ra1 = id_ex_rs2_ptag;
-    assign prf_ra2 = id1_ex_rs1_ptag;
-    assign prf_ra3 = id1_ex_rs2_ptag;
+    // 读地址：直接用 arch rs 索引；map[] 在 Stage 1 不参与数据通路。
+    assign prf_ra0 = {1'b0, id_ex_rs1_addr};
+    assign prf_ra1 = {1'b0, id_ex_rs2_addr};
+    assign prf_ra2 = {1'b0, id1_ex_rs1_addr};
+    assign prf_ra3 = {1'b0, id1_ex_rs2_addr};
 
-    // M3.4d: commit 端把架构寄存器值写入 PRF[arch_idx]，使 PRF[0..31] 始终
-    // 反映 commit 后的架构状态（ptag 0..31 为 arch 槽）。
-    assign prf_we2 = rob_commit_valid_0 && rob_commit_rw_0 && (rob_commit_rd_0 != 5'd0);
-    assign prf_wa2 = {1'b0, rob_commit_rd_0};
-    assign prf_wd2 = rob_commit_res_0;
-    assign prf_we3 = rob_commit_valid_1 && rob_commit_rw_1 && (rob_commit_rd_1 != 5'd0);
-    assign prf_wa3 = {1'b0, rob_commit_rd_1};
-    assign prf_wd3 = rob_commit_res_1;
+    // Stage 1: 暂停 commit 端的 PRF 写（与 we0/we1 重复且优先级混乱）。
+    assign prf_we2 = 1'b0;
+    assign prf_wa2 = 6'd0;
+    assign prf_wd2 = 32'd0;
+    assign prf_we3 = 1'b0;
+    assign prf_wa3 = 6'd0;
+    assign prf_wd3 = 32'd0;
 
     // ---------------- Debug ----------------
     assign dbg_pc       = pc;

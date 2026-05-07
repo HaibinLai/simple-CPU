@@ -299,6 +299,8 @@ module tb_cpu;
             for (ri = 0; ri < 32; ri = ri + 1) begin
                 if (u_dut.u_prf.regs[ri] !== u_dut.u_rf.regs[ri]) begin
                     c_arch_diff = c_arch_diff + 1;
+                    $display("[TB][DIVERGE] x%02d  prf=0x%08h  rf=0x%08h",
+                             ri, u_dut.u_prf.regs[ri], u_dut.u_rf.regs[ri]);
                 end
             end
             if (c_arch_diff != 0) begin

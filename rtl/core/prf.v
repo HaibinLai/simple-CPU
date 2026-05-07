@@ -45,9 +45,26 @@ module prf #(
         end
     end
 
-    assign rd0 = regs[ra0];
-    assign rd1 = regs[ra1];
-    assign rd2 = regs[ra2];
-    assign rd3 = regs[ra3];
+    // 写旁路（同周期写值在读口可见）。
+    // 注意 we1 (slot1 EX1) 的 wd1 由 prf_r2/r3 间接计算（slot1 操作数）；任何
+    // we1 → ra* 的旁路都可能经 slot1-forwarding-from-id_ex（slot1 用 slot0 同周期
+    // EX 结果）形成组合环（prf_r0 → ex_alu_y → slot1_alu_y → wd1 → prf_r0）。
+    // 因此 **we1 不参与任何旁路**；slot1 是 slot0 的 younger，不会被 slot0 同周期消费，
+    // 而 slot1 自己的同周期写也不会被自己读。
+    // we0 (slot0 WB) / we2/we3 (commit) 的 wd 均来自寄存器化的流水线结果，
+    // 不依赖 PRF 读，旁路安全。
+    // 优先级：we3 > we2 > we0。
+    assign rd0 = (we3 && (wa3 == ra0)) ? wd3 :
+                 (we2 && (wa2 == ra0)) ? wd2 :
+                 (we0 && (wa0 == ra0)) ? wd0 : regs[ra0];
+    assign rd1 = (we3 && (wa3 == ra1)) ? wd3 :
+                 (we2 && (wa2 == ra1)) ? wd2 :
+                 (we0 && (wa0 == ra1)) ? wd0 : regs[ra1];
+    assign rd2 = (we3 && (wa3 == ra2)) ? wd3 :
+                 (we2 && (wa2 == ra2)) ? wd2 :
+                 (we0 && (wa0 == ra2)) ? wd0 : regs[ra2];
+    assign rd3 = (we3 && (wa3 == ra3)) ? wd3 :
+                 (we2 && (wa2 == ra3)) ? wd2 :
+                 (we0 && (wa0 == ra3)) ? wd0 : regs[ra3];
 
 endmodule
