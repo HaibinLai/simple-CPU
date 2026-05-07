@@ -123,11 +123,15 @@ module cpu_top (
     );
 
     // 分支预测器
+    localparam BPU_GHR_W = 8;
     wire        bpu_pred_taken;
     wire [31:0] bpu_pred_target;
+    wire [BPU_GHR_W-1:0] bpu_pred_ghr;     // IF 时 GHR 快照
     wire        bpu_upd_valid;
     wire [31:0] bpu_upd_pc, bpu_upd_target;
     wire        bpu_upd_taken;
+    wire        bpu_upd_is_uncond;
+    wire [BPU_GHR_W-1:0] bpu_upd_pred_ghr;  // 训练时还原预测索引用的 GHR
 
     bpu u_bpu (
         .clk         (clk),
@@ -135,10 +139,13 @@ module cpu_top (
         .if_pc       (pc),
         .pred_taken  (bpu_pred_taken),
         .pred_target (bpu_pred_target),
+        .pred_ghr_o  (bpu_pred_ghr),
         .upd_valid   (bpu_upd_valid),
         .upd_pc      (bpu_upd_pc),
         .upd_taken   (bpu_upd_taken),
-        .upd_target  (bpu_upd_target)
+        .upd_target  (bpu_upd_target),
+        .upd_is_uncond(bpu_upd_is_uncond),
+        .upd_pred_ghr(bpu_upd_pred_ghr)
     );
 
     // PC 选择：刷新 > stall/反压 > 预测 > PC+8（双发射前端）
@@ -161,6 +168,7 @@ module cpu_top (
     reg        if_id_valid1;
     reg        if_id_pred_taken;
     reg [31:0] if_id_pred_target;
+    reg [BPU_GHR_W-1:0] if_id_pred_ghr;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -172,6 +180,7 @@ module cpu_top (
             if_id_valid1      <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
+            if_id_pred_ghr    <= {BPU_GHR_W{1'b0}};
         end else if (ex_redirect) begin
             // 刷新 IF/ID1（注入气泡）
             if_id_pc0         <= 32'b0;
@@ -182,6 +191,7 @@ module cpu_top (
             if_id_valid1      <= 1'b0;
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
+            if_id_pred_ghr    <= {BPU_GHR_W{1'b0}};
         end else if (if_freeze) begin
             // 冻结 IF/ID1：保持当前值（load-use stall 或 IFQ 反压）
             if_id_pc0         <= if_id_pc0;
@@ -192,6 +202,7 @@ module cpu_top (
             if_id_valid1      <= if_id_valid1;
             if_id_pred_taken  <= if_id_pred_taken;
             if_id_pred_target <= if_id_pred_target;
+            if_id_pred_ghr    <= if_id_pred_ghr;
         end else begin
             if_id_pc0         <= pc;
             if_id_instr0      <= imem_rdata0;
@@ -202,6 +213,7 @@ module cpu_top (
             if_id_valid1      <= ~bpu_pred_taken;
             if_id_pred_taken  <= bpu_pred_taken;
             if_id_pred_target <= bpu_pred_target;
+            if_id_pred_ghr    <= bpu_pred_ghr;
         end
     end
 
@@ -214,6 +226,7 @@ module cpu_top (
     wire [31:0] id1_id2_instr0;
     wire        id1_id2_pred_taken;
     wire [31:0] id1_id2_pred_target;
+    wire [BPU_GHR_W-1:0] id1_id2_pred_ghr;
 
     wire        id1_id2_valid1;
     wire [31:0] id1_id2_pc1;
@@ -221,6 +234,7 @@ module cpu_top (
     // slot1 prediction signals are not used by ID2 (slot1 cannot be a branch in M1.5 rules)
     wire        id1_id2_pred_taken1_unused;
     wire [31:0] id1_id2_pred_target1_unused;
+    wire [BPU_GHR_W-1:0] id1_id2_pred_ghr1_unused;
 
     // pop 控制：当 backend 接受 slot0 时（无 stall、无 redirect、有效），消费一条
     wire ifq_pop_slot0  = id1_id2_valid0 && !stall && !ex_redirect;
@@ -230,7 +244,7 @@ module cpu_top (
 
     wire [3:0]  ifq_count;
 
-    ifq #(.DEPTH(8), .AW(3)) u_ifq (
+    ifq #(.DEPTH(8), .AW(3), .PRED_GHR_W(BPU_GHR_W)) u_ifq (
         .clk    (clk),
         .rst_n  (rst_n),
         .flush  (ex_redirect),
@@ -240,11 +254,13 @@ module cpu_top (
         .push_instr_0       (if_id_instr0),
         .push_pred_taken_0  (if_id_pred_taken),
         .push_pred_target_0 (if_id_pred_target),
+        .push_pred_ghr_0    (if_id_pred_ghr),
         .push_valid_1       (if_id_valid1 && !if_freeze),
         .push_pc_1          (if_id_pc1),
         .push_instr_1       (if_id_instr1),
         .push_pred_taken_1  (1'b0),    // slot1 不携带预测（仅 slot0 可能是分支）
         .push_pred_target_1 (32'b0),
+        .push_pred_ghr_1    ({BPU_GHR_W{1'b0}}),
         .full               (ifq_full),
         .almost_full        (ifq_almost_full),
         // Pop side -> ID2 decode
@@ -254,12 +270,14 @@ module cpu_top (
         .head_instr         (id1_id2_instr0),
         .head_pred_taken    (id1_id2_pred_taken),
         .head_pred_target   (id1_id2_pred_target),
+        .head_pred_ghr      (id1_id2_pred_ghr),
         // 第二头（R2 双发射用）
         .head2_valid        (id1_id2_valid1),
         .head2_pc           (id1_id2_pc1),
         .head2_instr        (id1_id2_instr1),
         .head2_pred_taken   (id1_id2_pred_taken1_unused),
         .head2_pred_target  (id1_id2_pred_target1_unused),
+        .head2_pred_ghr     (id1_id2_pred_ghr1_unused),
         .pop2               (ifq_pop_slot1),
         .count              (ifq_count)
     );
@@ -526,6 +544,7 @@ module cpu_top (
     reg        id_ex_is_ecall, id_ex_is_mret, id_ex_is_illegal;
     reg        id_ex_pred_taken;
     reg [31:0] id_ex_pred_target;
+    reg [BPU_GHR_W-1:0] id_ex_pred_ghr;
     reg [3:0]  id_ex_rob_tag;
     reg [5:0]  id_ex_rd_ptag;
     reg [5:0]  id_ex_rs1_ptag, id_ex_rs2_ptag;
@@ -670,6 +689,7 @@ module cpu_top (
             id_ex_is_illegal <= 1'b0;
             id_ex_pred_taken <= 1'b0;
             id_ex_pred_target<= 32'b0;
+            id_ex_pred_ghr   <= {BPU_GHR_W{1'b0}};
             id_ex_rd_ptag    <= 6'b0;
             id_ex_rs1_ptag   <= 6'b0;
             id_ex_rs2_ptag   <= 6'b0;
@@ -688,6 +708,7 @@ module cpu_top (
             id_ex_is_illegal  <= 1'b0;
             id_ex_pred_taken  <= 1'b0;
             id_ex_pred_target <= 32'b0;
+            id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
         end else begin
             id_ex_pc          <= id1_id2_pc0;
             id_ex_instr       <= id_instr;
@@ -711,6 +732,7 @@ module cpu_top (
             id_ex_is_illegal  <= id_is_illegal;
             id_ex_pred_taken  <= id1_id2_pred_taken;
             id_ex_pred_target <= id1_id2_pred_target;
+            id_ex_pred_ghr    <= id1_id2_pred_ghr;
             id_ex_rob_tag     <= rob_alloc_tag_0;     // M3.2: 携带 ROB tag
             id_ex_rd_ptag     <= rn_s0_rd_ptag_new;   // M3.4b: 携带 rename ptag
             id_ex_rs1_ptag    <= rn_s0_rs1_ptag;       // M3.4c: 携带 rs ptag
@@ -882,6 +904,11 @@ module cpu_top (
     assign bpu_upd_pc     = ex_is_branch ? id_ex_pc          : id1_ex_pc;
     assign bpu_upd_taken  = ex_is_branch ? ex_br_taken       : slot1_br_taken;
     assign bpu_upd_target = ex_is_branch ? ex_actual_target  : slot1_br_target;
+    // 训练索引还原：slot0 使用流水线透传的快照；slot1 不携带快照，
+    // 退化为 0（slot1 仅限条件分支，占比低）。
+    assign bpu_upd_pred_ghr  = ex_is_branch ? id_ex_pred_ghr : {BPU_GHR_W{1'b0}};
+    // slot1 不受理 JAL/JALR，所以 is_uncond 只需看 slot0。
+    assign bpu_upd_is_uncond = ex_is_branch && id_ex_is_jump;
 
     // CSR 写入：异常入口记录 mepc/mcause；mret 只做跳转
     always @(posedge clk or negedge rst_n) begin

@@ -24,8 +24,9 @@
 `include "defines.v"
 
 module ifq #(
-    parameter DEPTH = 4,           // queue depth (must be power of 2)
-    parameter AW    = 2            // log2(DEPTH)
+    parameter DEPTH     = 4,           // queue depth (must be power of 2)
+    parameter AW        = 2,           // log2(DEPTH)
+    parameter PRED_GHR_W = 8           // GHR snapshot width (must match BPU)
 ) (
     input  wire clk,
     input  wire rst_n,
@@ -37,12 +38,14 @@ module ifq #(
     input  wire [31:0] push_instr_0,
     input  wire        push_pred_taken_0,
     input  wire [31:0] push_pred_target_0,
+    input  wire [PRED_GHR_W-1:0] push_pred_ghr_0,
 
     input  wire        push_valid_1,
     input  wire [31:0] push_pc_1,
     input  wire [31:0] push_instr_1,
     input  wire        push_pred_taken_1,
     input  wire [31:0] push_pred_target_1,
+    input  wire [PRED_GHR_W-1:0] push_pred_ghr_1,
 
     output wire        full,
     output wire        almost_full,    // free <= 1, cannot accept 2 pushes
@@ -54,6 +57,7 @@ module ifq #(
     output wire [31:0] head_instr,
     output wire        head_pred_taken,
     output wire [31:0] head_pred_target,
+    output wire [PRED_GHR_W-1:0] head_pred_ghr,
 
     // Phase R2 (future): second-head visibility for dual-issue
     output wire        head2_valid,
@@ -61,6 +65,7 @@ module ifq #(
     output wire [31:0] head2_instr,
     output wire        head2_pred_taken,
     output wire [31:0] head2_pred_target,
+    output wire [PRED_GHR_W-1:0] head2_pred_ghr,
     input  wire        pop2,           // pop a second entry (Phase R2)
 
     // Diagnostics
@@ -72,6 +77,7 @@ module ifq #(
     reg [31:0] instr_q       [0:DEPTH-1];
     reg        pred_taken_q  [0:DEPTH-1];
     reg [31:0] pred_target_q [0:DEPTH-1];
+    reg [PRED_GHR_W-1:0] pred_ghr_q [0:DEPTH-1];
     reg        valid_q       [0:DEPTH-1];
 
     // ---- Pointers ----
@@ -89,6 +95,7 @@ module ifq #(
     assign head_instr       = instr_q[head_ptr];
     assign head_pred_taken  = pred_taken_q[head_ptr];
     assign head_pred_target = pred_target_q[head_ptr];
+    assign head_pred_ghr    = pred_ghr_q[head_ptr];
 
     wire [AW-1:0] head2_idx = head_ptr + 1'b1;
     assign head2_valid       = (cnt >= 2) && valid_q[head2_idx];
@@ -96,6 +103,7 @@ module ifq #(
     assign head2_instr       = instr_q[head2_idx];
     assign head2_pred_taken  = pred_taken_q[head2_idx];
     assign head2_pred_target = pred_target_q[head2_idx];
+    assign head2_pred_ghr    = pred_ghr_q[head2_idx];
 
     // ---- How many pushes this cycle? ----
     wire actual_push_0 = push_valid_0 && (cnt + (pop ? -1 : 0) + (pop2 ? -1 : 0) < DEPTH);
@@ -121,6 +129,7 @@ module ifq #(
                 instr_q[i]       <= 32'h00000013;
                 pred_taken_q[i]  <= 1'b0;
                 pred_target_q[i] <= 32'b0;
+                pred_ghr_q[i]    <= {PRED_GHR_W{1'b0}};
                 valid_q[i]       <= 1'b0;
             end
         end else if (flush) begin
@@ -148,6 +157,7 @@ module ifq #(
                 instr_q[tail_ptr]       <= push_instr_0;
                 pred_taken_q[tail_ptr]  <= push_pred_taken_0;
                 pred_target_q[tail_ptr] <= push_pred_target_0;
+                pred_ghr_q[tail_ptr]    <= push_pred_ghr_0;
                 valid_q[tail_ptr]       <= 1'b1;
             end
             if (do_push_1) begin
@@ -155,6 +165,7 @@ module ifq #(
                 instr_q[tail_ptr + 1'b1]       <= push_instr_1;
                 pred_taken_q[tail_ptr + 1'b1]  <= push_pred_taken_1;
                 pred_target_q[tail_ptr + 1'b1] <= push_pred_target_1;
+                pred_ghr_q[tail_ptr + 1'b1]    <= push_pred_ghr_1;
                 valid_q[tail_ptr + 1'b1]       <= 1'b1;
             end
 
