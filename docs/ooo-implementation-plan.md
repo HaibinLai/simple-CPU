@@ -53,7 +53,7 @@ IF → IFQ → ID/Rename(in-order) → IQ
 
 ---
 
-### Stage 2 — 取消 regfile，唯一存储 = PRF
+### Stage 2 — 取消 regfile，唯一存储 = PRF ✅
 **目标**：架构寄存器和重命名寄存器统一在 PRF 里（`ptag 0..31` = 架构槽，`32..47` = 重命名槽，commit 时 `we2/3` 把架构值写回 0..31，已实现）。
 
 **改动**：

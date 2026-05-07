@@ -291,20 +291,9 @@ module tb_cpu;
     task print_summary;
         integer ri;
         begin
-            // 32 寄存器终态 dump（用于运行器与独立 ISS 逐寄存器比对）
+            // 32 寄存器终态 dump（从 PRF[0..31] 读取，架构状态唯一来源）
             for (ri = 0; ri < 32; ri = ri + 1) begin
-                $display("[TB] REG x%02d=0x%08h", ri, u_dut.u_rf.regs[ri]);
-            end
-            // M3.4d: 终态 PRF[0..31] vs regfile[0..31] 一致性检查
-            for (ri = 0; ri < 32; ri = ri + 1) begin
-                if (u_dut.u_prf.regs[ri] !== u_dut.u_rf.regs[ri]) begin
-                    c_arch_diff = c_arch_diff + 1;
-                    $display("[TB][DIVERGE] x%02d  prf=0x%08h  rf=0x%08h",
-                             ri, u_dut.u_prf.regs[ri], u_dut.u_rf.regs[ri]);
-                end
-            end
-            if (c_arch_diff != 0) begin
-                $display("[TB][WARN] arch state diverges: PRF[0..31] vs regfile mismatch=%0d", c_arch_diff);
+                $display("[TB] REG x%02d=0x%08h", ri, u_dut.u_prf.regs[ri]);
             end
             $display("[TB] cycles=%0d  retired=%0d  CPI=%f",
                      cycles, instrs_retired,

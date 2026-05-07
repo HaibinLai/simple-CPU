@@ -417,16 +417,10 @@ module cpu_top (
                              id1_no_store_alias_hazard;
     wire id2_issue_slot0 = id1_id2_valid0;
 
-    // 寄存器堆（写口接到 WB）
+    // 寄存器堆写回信号（PRF 是唯一存储；Stage 2 已删除架构 regfile）
     wire        wb_we;
     wire [4:0]  wb_rd;
     wire [31:0] wb_data;
-
-    // Slot0 read outputs
-    wire [31:0] id_rs1_data, id_rs2_data;
-    
-    // Slot1 read outputs (Milestone 2)
-    wire [31:0] id1_rs1_data, id1_rs2_data;
 
     // M3.2: ROB alloc tag forward decl（实例化在文件末尾）
     wire [3:0]  rob_alloc_tag_0;
@@ -464,30 +458,11 @@ module cpu_top (
     // M3.4c PRF read addresses (sourced from EX-stage rs ptag pipeline regs)
     wire [5:0]  prf_ra0, prf_ra1, prf_ra2, prf_ra3;
     
-    regfile u_rf (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        // Slot0 read ports
-        .rs1_addr (id_rs1),
-        .rs2_addr (id_rs2),
-        .rs1_data (id_rs1_data),
-        .rs2_data (id_rs2_data),
-        // Slot1 read ports (new)
-        .rs3_addr (id1_rs1),
-        .rs4_addr (id1_rs2),
-        .rs3_data (id1_rs1_data),
-        .rs4_data (id1_rs2_data),
-        // Slot0 write port
-        .we0      (wb_we),
-        .rd0_addr (wb_rd),
-        .rd0_data (wb_data),
-        // Slot1 write port (new)
-        .we1      (slot1_wb_we),
-        .rd1_addr (slot1_wb_rd),
-        .rd1_data (slot1_wb_data)
-    );
+    // OoO Stage 2: 删除架构 regfile —— PRF 成为唯一寄存器存储。
+    // ID2 阶段不再读寄存器；EX1 通过 prf_r0..3 (arch idx 索引) 拿到操作数。
+    // 旧的 id_*_data wire 与 id_ex_rs* (32-bit data) 流水线寄存器已一并删除。
 
-    // M3.4b: 物理寄存器文件（当前仅写入，读口先做观测）
+    // 物理寄存器文件（48 项，前 32 槽 = 架构寄存器；we0/we1 写 arch idx）
     prf #(.DEPTH(48), .AW(6)) u_prf (
         .clk      (clk),
         .rst_n    (rst_n),
@@ -517,7 +492,7 @@ module cpu_top (
 
     reg [31:0] id1_ex_pc;
     reg [31:0] id1_ex_instr;
-    reg [31:0] id1_ex_rs1, id1_ex_rs2, id1_ex_imm;
+    reg [31:0] id1_ex_imm;
     reg [4:0]  id1_ex_rs1_addr, id1_ex_rs2_addr;
     reg [4:0]  id1_ex_rd;
     reg [3:0]  id1_ex_alu_op;
@@ -536,7 +511,7 @@ module cpu_top (
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
     reg [31:0] id_ex_instr;
-    reg [31:0] id_ex_rs1, id_ex_rs2, id_ex_imm;
+    reg [31:0] id_ex_imm;
     reg [4:0]  id_ex_rs1_addr, id_ex_rs2_addr;
     reg [4:0]  id_ex_rd;
     reg [3:0]  id_ex_alu_op;
@@ -622,8 +597,6 @@ module cpu_top (
         if (!rst_n) begin
             id1_ex_pc         <= 32'b0;
             id1_ex_instr      <= 32'h00000013;
-            id1_ex_rs1        <= 32'b0;
-            id1_ex_rs2        <= 32'b0;
             id1_ex_imm        <= 32'b0;
             id1_ex_rs1_addr   <= 5'b0;
             id1_ex_rs2_addr   <= 5'b0;
@@ -652,8 +625,6 @@ module cpu_top (
         end else begin
             id1_ex_pc         <= id1_id2_pc1;
             id1_ex_instr      <= id1_instr;
-            id1_ex_rs1        <= id1_rs1_data;        // slot1 读寄存器
-            id1_ex_rs2        <= id1_rs2_data;        // slot1 读寄存器
             id1_ex_imm        <= id_imm;              // slot0 产生的立即数，对 slot1 不适用；仅 PHase 2C 使用
             id1_ex_rs1_addr   <= id1_rs1;
             id1_ex_rs2_addr   <= id1_rs2;
@@ -679,8 +650,6 @@ module cpu_top (
         if (!rst_n) begin
             id_ex_pc         <= 32'b0;
             id_ex_instr      <= 32'h00000013;
-            id_ex_rs1        <= 32'b0;
-            id_ex_rs2        <= 32'b0;
             id_ex_imm        <= 32'b0;
             id_ex_rs1_addr   <= 5'b0;
             id_ex_rs2_addr   <= 5'b0;
@@ -722,8 +691,6 @@ module cpu_top (
         end else begin
             id_ex_pc          <= id1_id2_pc0;
             id_ex_instr       <= id_instr;
-            id_ex_rs1         <= id_rs1_data;
-            id_ex_rs2         <= id_rs2_data;
             id_ex_imm         <= id_imm;
             id_ex_rs1_addr    <= id_rs1;
             id_ex_rs2_addr    <= id_rs2;
