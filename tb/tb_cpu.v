@@ -13,6 +13,10 @@
   `define SIM_TIMEOUT_NS 2000
 `endif
 
+`ifndef VCD_FILE
+  `define VCD_FILE "sim/cpu.vcd"
+`endif
+
 module tb_cpu;
     reg clk = 0;
     reg rst_n = 0;
@@ -137,8 +141,10 @@ module tb_cpu;
     wire dut_is_uncond_jump = dut_id_ex_valid && dut_id_ex_is_jump;
 
     initial begin
-        $dumpfile("sim/cpu.vcd");
+`ifdef ENABLE_VCD
+        $dumpfile(`VCD_FILE);
         $dumpvars(0, tb_cpu);
+`endif
 
         rst_n = 0;
         repeat (4) @(posedge clk);
@@ -347,6 +353,15 @@ module tb_cpu;
                      c_nta_load, c_nta_store, c_nta_branch, c_nta_jump, c_nta_other);
             $display("[TB] ifq: full=%0d almost_full=%0d",
                      c_ifq_full, c_ifq_almost_full);
+            // TAGE-2L 影子评估器
+            $display("[TB] tage_eval: total=%0d  t1_hit=%0d t2_hit=%0d  t1_use=%0d t2_use=%0d  t1_alloc=%0d t2_alloc=%0d alloc_fail=%0d",
+                     u_dut.tage_total, u_dut.tage_t1_hit, u_dut.tage_t2_hit,
+                     u_dut.tage_t1_use, u_dut.tage_t2_use,
+                     u_dut.tage_t1_alloc, u_dut.tage_t2_alloc, u_dut.tage_alloc_fail);
+            $display("[TB] tage_eval: tage_correct=%0d gshare_correct=%0d  tage_miss=%f gshare_miss=%f",
+                     u_dut.tage_correct, u_dut.gshare_correct,
+                     (u_dut.tage_total == 0) ? 0.0 : 1.0 - 1.0*u_dut.tage_correct/u_dut.tage_total,
+                     (u_dut.tage_total == 0) ? 0.0 : 1.0 - 1.0*u_dut.gshare_correct/u_dut.tage_total);
         end
     endtask
 

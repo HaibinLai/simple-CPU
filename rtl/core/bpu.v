@@ -21,7 +21,7 @@
 module bpu #(
     parameter BHT_IDX_W = 8,    // 256
     parameter BTB_IDX_W = 5,    // 32 sets
-    parameter GHR_W     = 8
+    parameter GHR_W     = 32    // 长全局历史，GShare/TAGE 均使用 fold
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -81,12 +81,23 @@ module bpu #(
     wire if_hit1 = btb1_valid[if_btb_idx] && (btb1_tag[if_btb_idx] == if_btb_tag);
     wire btb_hit = if_hit0 | if_hit1;
 
-    // GShare BHT 索引: pc[9:2] XOR ghr
-    // GShare 启用：pc[9:2] XOR ghr_snapshot。训练端使用 IF 时的 GHR 快照。
-    // 默认参数下 BHT_IDX_W==GHR_W==8，Verilog 自动宽度对齐。
+    // GShare BHT 索引：pc[9:2] XOR fold(ghr, BHT_IDX_W)。
+    // GHR_W 可大于 BHT_IDX_W，采用分段 XOR 折叠（wrap-around fold）。
+    function [BHT_IDX_W-1:0] fold_bht;
+        input [GHR_W-1:0] g;
+        integer k;
+        reg [BHT_IDX_W-1:0] acc;
+        begin
+            acc = {BHT_IDX_W{1'b0}};
+            for (k = 0; k < GHR_W; k = k + BHT_IDX_W) begin
+                acc = acc ^ g[k +: BHT_IDX_W];
+            end
+            fold_bht = acc;
+        end
+    endfunction
+
     wire [BHT_IDX_W-1:0] if_pc_idx  = if_pc[BHT_IDX_W+1:2];
-    wire [GHR_W-1:0]     ghr_snap   = ghr;
-    wire [BHT_IDX_W-1:0] if_bht_idx = if_pc_idx ^ ghr_snap;
+    wire [BHT_IDX_W-1:0] if_bht_idx = if_pc_idx ^ fold_bht(ghr);
     wire bht_taken = bht[if_bht_idx][1];
     // 命中项是否为无条件跳转。若是，pred_taken 跳过 BHT 门控。
     wire if_hit_uncond = (if_hit0 && btb0_uncond[if_btb_idx]) ||
@@ -100,7 +111,7 @@ module bpu #(
     wire [BTB_IDX_W-1:0] upd_btb_idx = upd_pc[BTB_IDX_W+1:2];
     wire [BTB_TAG_W-1:0] upd_btb_tag = upd_pc[31:BTB_IDX_W+2];
     wire [BHT_IDX_W-1:0] upd_pc_idx  = upd_pc[BHT_IDX_W+1:2];
-    wire [BHT_IDX_W-1:0] upd_bht_idx = upd_pc_idx ^ upd_pred_ghr;
+    wire [BHT_IDX_W-1:0] upd_bht_idx = upd_pc_idx ^ fold_bht(upd_pred_ghr);
 
     wire u_hit0 = btb0_valid[upd_btb_idx] && (btb0_tag[upd_btb_idx] == upd_btb_tag);
     wire u_hit1 = btb1_valid[upd_btb_idx] && (btb1_tag[upd_btb_idx] == upd_btb_tag);

@@ -123,7 +123,7 @@ module cpu_top (
     );
 
     // 分支预测器
-    localparam BPU_GHR_W = 8;
+    localparam BPU_GHR_W = 32;
     wire        bpu_pred_taken;
     wire [31:0] bpu_pred_target;
     wire [BPU_GHR_W-1:0] bpu_pred_ghr;     // IF 时 GHR 快照
@@ -146,6 +146,30 @@ module cpu_top (
         .upd_target  (bpu_upd_target),
         .upd_is_uncond(bpu_upd_is_uncond),
         .upd_pred_ghr(bpu_upd_pred_ghr)
+    );
+
+    // TAGE-2L 影子评估器（不参与 PC 选择，仅采集 mispred 对比统计）
+    wire [31:0] tage_total, tage_t1_hit, tage_t2_hit, tage_t1_use, tage_t2_use;
+    wire [31:0] tage_correct, gshare_correct;
+    wire [31:0] tage_t1_alloc, tage_t2_alloc, tage_alloc_fail;
+    bpu_tage_eval #(.GHR_W(BPU_GHR_W)) u_bpu_tage_eval (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .upd_valid      (bpu_upd_valid),
+        .upd_pc         (bpu_upd_pc),
+        .upd_pred_ghr   (bpu_upd_pred_ghr),
+        .upd_taken      (bpu_upd_taken),
+        .upd_is_uncond  (bpu_upd_is_uncond),
+        .tage_total     (tage_total),
+        .tage_t1_hit    (tage_t1_hit),
+        .tage_t2_hit    (tage_t2_hit),
+        .tage_t1_use    (tage_t1_use),
+        .tage_t2_use    (tage_t2_use),
+        .tage_correct   (tage_correct),
+        .gshare_correct (gshare_correct),
+        .tage_t1_alloc  (tage_t1_alloc),
+        .tage_t2_alloc  (tage_t2_alloc),
+        .tage_alloc_fail(tage_alloc_fail)
     );
 
     // PC 选择：刷新 > stall/反压 > 预测 > PC+8（双发射前端）
