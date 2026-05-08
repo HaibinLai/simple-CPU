@@ -172,9 +172,28 @@ module cpu_top (
         .tage_alloc_fail(tage_alloc_fail)
     );
 
-    // PC 选择：刷新 > stall/反压 > 预测 > PC+8（双发射前端）
+    // PC 选择：刷新 > stall/反压 > 预测 > slot1-JAL 静态跳转 > PC+8
+    //
+    // A2-step2 (v2 — proper fix): slot1 是 JAL 时，在 IF 阶段直接静态计算
+    // 目标并 redirect PC，避免一律走 PC+8 取错路径再到 EX flush。
+    // 同时把 (taken=1, target=jal_target) 注入 IFQ 的 slot1 push 端，
+    // 这条 JAL 后续以 slot0 形式被消费时 EX 不会再判 mispredict。
+    //   * 仅在 BPU 没在 slot0 预测 taken 时触发（否则 slot1 会被 if_id_valid1=0 丢掉）
+    //   * 不需要任何预测器状态
+    //   * 必须 PC redirect + IFQ 预测两件事一起做，缺一不可（否则就是被 revert
+    //     的旧 A2-step2：wrong-path store 会进入并提交，由 tools/run_a2step2_robustness.py 拦住）
+    wire        if_slot1_is_jal      = (imem_rdata1[6:0] == 7'b1101111);
+    wire [31:0] if_slot1_jal_imm     = {{12{imem_rdata1[31]}},
+                                        imem_rdata1[19:12],
+                                        imem_rdata1[20],
+                                        imem_rdata1[30:21], 1'b0};
+    wire [31:0] if_slot1_jal_target  = pc_plus4 + if_slot1_jal_imm;
+    wire        if_take_slot1_jal    = if_slot1_is_jal && !bpu_pred_taken;
+
     // BPU 仅在 slot0 处预测；若预测 taken，则 slot1 被丢弃，PC 跳转到目标
-    wire [31:0] pc_next_seq = bpu_pred_taken ? bpu_pred_target : pc_plus8;
+    wire [31:0] pc_next_seq = bpu_pred_taken    ? bpu_pred_target :
+                              if_take_slot1_jal ? if_slot1_jal_target :
+                                                  pc_plus8;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)            pc <= `RESET_PC;
@@ -193,6 +212,9 @@ module cpu_top (
     reg        if_id_pred_taken;
     reg [31:0] if_id_pred_target;
     reg [BPU_GHR_W-1:0] if_id_pred_ghr;
+    // A2-step2 (v2): slot1 静态 JAL 预测随 if_id 流水线走
+    reg        if_id_pred_taken1;
+    reg [31:0] if_id_pred_target1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -205,6 +227,8 @@ module cpu_top (
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
             if_id_pred_ghr    <= {BPU_GHR_W{1'b0}};
+            if_id_pred_taken1 <= 1'b0;
+            if_id_pred_target1<= 32'b0;
         end else if (ex_redirect) begin
             // 刷新 IF/ID1（注入气泡）
             if_id_pc0         <= 32'b0;
@@ -216,6 +240,8 @@ module cpu_top (
             if_id_pred_taken  <= 1'b0;
             if_id_pred_target <= 32'b0;
             if_id_pred_ghr    <= {BPU_GHR_W{1'b0}};
+            if_id_pred_taken1 <= 1'b0;
+            if_id_pred_target1<= 32'b0;
         end else if (if_freeze) begin
             // 冻结 IF/ID1：保持当前值（load-use stall 或 IFQ 反压）
             if_id_pc0         <= if_id_pc0;
@@ -227,6 +253,8 @@ module cpu_top (
             if_id_pred_taken  <= if_id_pred_taken;
             if_id_pred_target <= if_id_pred_target;
             if_id_pred_ghr    <= if_id_pred_ghr;
+            if_id_pred_taken1 <= if_id_pred_taken1;
+            if_id_pred_target1<= if_id_pred_target1;
         end else begin
             if_id_pc0         <= pc;
             if_id_instr0      <= imem_rdata0;
@@ -238,6 +266,9 @@ module cpu_top (
             if_id_pred_taken  <= bpu_pred_taken;
             if_id_pred_target <= bpu_pred_target;
             if_id_pred_ghr    <= bpu_pred_ghr;
+            // 静态 slot1-JAL 预测（仅在 slot0 不 taken 时有效；与上面 pc_next_seq 同步）
+            if_id_pred_taken1 <= if_take_slot1_jal;
+            if_id_pred_target1<= if_slot1_jal_target;
         end
     end
 
@@ -282,8 +313,9 @@ module cpu_top (
         .push_valid_1       (if_id_valid1 && !if_freeze),
         .push_pc_1          (if_id_pc1),
         .push_instr_1       (if_id_instr1),
-        .push_pred_taken_1  (1'b0),    // slot1 不携带预测（仅 slot0 可能是分支）
-        .push_pred_target_1 (32'b0),
+        // A2-step2 (v2): 静态 slot1 JAL 预测（来自 IF 阶段的解码 + PC redirect）
+        .push_pred_taken_1  (if_id_pred_taken1),
+        .push_pred_target_1 (if_id_pred_target1),
         .push_pred_ghr_1    ({BPU_GHR_W{1'b0}}),
         .full               (ifq_full),
         .almost_full        (ifq_almost_full),
