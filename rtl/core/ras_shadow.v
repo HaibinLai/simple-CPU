@@ -50,7 +50,11 @@ module ras_shadow #(
     output reg [31:0] ret_pred_wrong,
     output reg [31:0] bpu_pred_correct_on_ret,
     output reg [31:0] stack_underflow,
-    output reg [31:0] stack_overflow
+    output reg [31:0] stack_overflow,
+
+    // P1.6: 把 RAS 顶端暴露给 IF 阶段做 JALR-ret fast redirect
+    output wire        ras_top_valid,
+    output wire [31:0] ras_top_o
 );
 
     localparam AW = $clog2(DEPTH);
@@ -68,6 +72,8 @@ module ras_shadow #(
     // RAS prediction = top-of-stack (if non-empty)
     wire        ras_valid = (sp != 0);
     wire [31:0] ras_top   = ras_valid ? stack[sp - 1'b1] : 32'b0;
+    assign ras_top_valid = ras_valid;
+    assign ras_top_o     = ras_top;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

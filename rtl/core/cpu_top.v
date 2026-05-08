@@ -188,10 +188,65 @@ module cpu_top (
                                         imem_rdata1[20],
                                         imem_rdata1[30:21], 1'b0};
     wire [31:0] if_slot1_jal_target  = pc_plus4 + if_slot1_jal_imm;
-    wire        if_take_slot1_jal    = if_slot1_is_jal && !bpu_pred_taken;
+
+    // P1.6: slot0/slot1 是 JALR-ret 时用 RAS 顶预测目标，在 IF 直接 redirect。
+    //   ret 识别同 ras_shadow.v 里的定义：JALR && rs1∈{x1,x5} && rd∉{x1,x5}
+    //   ras_shadow 的栈在 EX 阶段 push/pop，同一个 top 会被 IF 读、后被
+    //   EX 弹出；预测错了依靠 EX redirect 兼完成讯号的 flush。
+    //   实际 bench (dotprod/matmul) 中 ret 几乎都出现在 slot1，所以两个 slot 都要接。
+    wire [31:0] ras_top_for_pred;
+    wire        ras_top_valid_for_pred;
+
+    wire        if_slot0_is_jalr     = (imem_rdata0[6:0] == 7'b1100111);
+    wire [4:0]  if_slot0_rs1         = imem_rdata0[19:15];
+    wire [4:0]  if_slot0_rd          = imem_rdata0[11:7];
+    wire        if_slot0_link_rs1    = (if_slot0_rs1 == 5'd1) || (if_slot0_rs1 == 5'd5);
+    wire        if_slot0_link_rd     = (if_slot0_rd  == 5'd1) || (if_slot0_rd  == 5'd5);
+    wire        if_slot0_is_ret      = if_slot0_is_jalr && if_slot0_link_rs1 && !if_slot0_link_rd;
+    wire        if_take_slot0_ret    = if_slot0_is_ret && ras_top_valid_for_pred && !bpu_pred_taken;
+
+    wire        if_slot1_is_jalr     = (imem_rdata1[6:0] == 7'b1100111);
+    wire [4:0]  if_slot1_rs1         = imem_rdata1[19:15];
+    wire [4:0]  if_slot1_rd          = imem_rdata1[11:7];
+    wire        if_slot1_link_rs1    = (if_slot1_rs1 == 5'd1) || (if_slot1_rs1 == 5'd5);
+    wire        if_slot1_link_rd     = (if_slot1_rd  == 5'd1) || (if_slot1_rd  == 5'd5);
+    wire        if_slot1_is_ret      = if_slot1_is_jalr && if_slot1_link_rs1 && !if_slot1_link_rd;
+    // 仅在 slot0 不跳、也不是 slot0-ret、也不是 slot1-JAL 时才手点 slot1-ret
+    wire        if_take_slot1_ret    = if_slot1_is_ret && !bpu_pred_taken && !if_take_slot0_ret
+                                       && ras_top_valid_for_pred;
+
+    // BPU-taken 优先 > slot0-ret > slot1-ret > slot1-JAL
+    wire        if_pred_taken_eff   = bpu_pred_taken | if_take_slot0_ret;
+    wire [31:0] if_pred_target_eff  = bpu_pred_taken    ? bpu_pred_target
+                                                        : ras_top_for_pred;
+
+    wire        if_take_slot1_jal    = if_slot1_is_jal && !bpu_pred_taken
+                                       && !if_take_slot0_ret && !if_take_slot1_ret;
+
+    // P1.6 \u8c03\u8bd5\u8ba1\u6570\uff1aIF \u9636\u6bb5\u89e6\u53d1\u7684 ret-redirect \u6b21\u6570
+    reg [31:0] dbg_ret_pred_fire;
+    reg [31:0] dbg_slot0_is_ret_seen;
+    reg [31:0] dbg_ras_top_valid_seen;
+    reg [31:0] dbg_bpu_pred_taken_on_ret;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_ret_pred_fire        <= 32'b0;
+            dbg_slot0_is_ret_seen    <= 32'b0;
+            dbg_ras_top_valid_seen   <= 32'b0;
+            dbg_bpu_pred_taken_on_ret<= 32'b0;
+        end else begin
+            if (if_take_slot0_ret) dbg_ret_pred_fire     <= dbg_ret_pred_fire     + 32'd1;
+            if (if_slot0_is_ret)   dbg_slot0_is_ret_seen <= dbg_slot0_is_ret_seen + 32'd1;
+            if (if_slot0_is_ret && ras_top_valid_for_pred)
+                dbg_ras_top_valid_seen <= dbg_ras_top_valid_seen + 32'd1;
+            if (if_slot0_is_ret && bpu_pred_taken)
+                dbg_bpu_pred_taken_on_ret <= dbg_bpu_pred_taken_on_ret + 32'd1;
+        end
+    end
 
     // BPU 仅在 slot0 处预测；若预测 taken，则 slot1 被丢弃，PC 跳转到目标
-    wire [31:0] pc_next_seq = bpu_pred_taken    ? bpu_pred_target :
+    wire [31:0] pc_next_seq = if_pred_taken_eff ? if_pred_target_eff :
+                              if_take_slot1_ret ? ras_top_for_pred  :
                               if_take_slot1_jal ? if_slot1_jal_target :
                                                   pc_plus8;
 
@@ -261,14 +316,15 @@ module cpu_top (
             if_id_valid0      <= 1'b1;
             if_id_pc1         <= pc_plus4;
             if_id_instr1      <= imem_rdata1;
-            // slot1 失效条件：BPU 在 slot0 预测 taken（slot1 在分支后，应被丢弃）
-            if_id_valid1      <= ~bpu_pred_taken;
-            if_id_pred_taken  <= bpu_pred_taken;
-            if_id_pred_target <= bpu_pred_target;
+            // slot1 失效条件：BPU 在 slot0 预测 taken，或 slot0 是 ret 被 IF redirect
+            if_id_valid1      <= ~if_pred_taken_eff;
+            if_id_pred_taken  <= if_pred_taken_eff;
+            if_id_pred_target <= if_pred_target_eff;
             if_id_pred_ghr    <= bpu_pred_ghr;
-            // 静态 slot1-JAL 预测（仅在 slot0 不 taken 时有效；与上面 pc_next_seq 同步）
-            if_id_pred_taken1 <= if_take_slot1_jal;
-            if_id_pred_target1<= if_slot1_jal_target;
+            // 静态 slot1-JAL / slot1-ret 预测（与上面 pc_next_seq 同步）
+            if_id_pred_taken1 <= if_take_slot1_jal | if_take_slot1_ret;
+            if_id_pred_target1<= if_take_slot1_ret ? ras_top_for_pred
+                                                   : if_slot1_jal_target;
         end
     end
 
@@ -1393,7 +1449,9 @@ module cpu_top (
         .ret_pred_wrong          (ras_sh_ret_pred_wrong),
         .bpu_pred_correct_on_ret (ras_sh_bpu_pred_correct_on_ret),
         .stack_underflow         (ras_sh_underflow),
-        .stack_overflow          (ras_sh_overflow)
+        .stack_overflow          (ras_sh_overflow),
+        .ras_top_valid           (ras_top_valid_for_pred),
+        .ras_top_o               (ras_top_for_pred)
     );
 
     // ---------------- Debug ----------------

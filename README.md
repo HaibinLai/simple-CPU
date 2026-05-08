@@ -19,6 +19,50 @@ Planning documents for near-term architecture work:
 - `docs/8stage-implementation-plan.md` — current 8-stage structural evolution plan.
 - `docs/2issue-implementation-plan.md` — proposed constrained 2-issue in-order upgrade plan.
 
+## Performance Optimization Log
+
+The 2-wide in-order superscalar core has gone through several rounds of
+data-driven micro-architectural tuning. Each step was validated by
+`make robust` (PC redirect / wrong-path store regression) and the
+`bench/` smoke set (`dotprod_32`, `matmul_4x4`, `crc32_64b`).
+All numbers are simulator cycles with the zero-D$-penalty model unless
+noted otherwise; the D$ miss-penalty estimator additionally reports
+upper bounds at `p ∈ {1, 3, 8}` cycles per miss.
+
+### Front-end / branch prediction
+| Direction | What | Result |
+| --- | --- | --- |
+| Slot1-JAL fast redirect (A2-step2 v2) | Decode JAL in slot1 at IF, statically compute target, redirect PC and inject `(taken=1, target)` into IFQ slot1. Forces an IF-stage PC redirect AND a matching IFQ prediction so EX never sees a mispredict — earlier "v1" only did the IFQ injection and let wrong-path stores retire (caught by `tools/run_a2step2_robustness.py`). | dotprod −31.6%, matmul −31.2%, crc32 −26.2% cycles. flush_jump 1003→70 / 2049→139 / 310→69. |
+| RAS-driven JALR-ret fast redirect (P1.6) | Promote `ras_shadow` from observability-only to a real predictor: expose its top-of-stack to IF, decode `jalr rd, 0(rs1)` ret patterns in **both** slot0 and slot1, redirect PC and inject `(taken=1, target=ras_top)` into IFQ. Mispredict (rare) still caught by EX. | dotprod cycles 6302→6126 (−2.8%), matmul 12846→12433 (−3.2%). flush_jump dotprod 70→39 (−31, ≈ all 32 rets); matmul 139→91 (−48 of 64 rets). |
+| BPU TAGE-2L primary + 2-way BTB | TAGE on direction; 32-set × 2-way BTB on target. BTB observability counters (`uncond_btb_hit / uncond_target_correct/wrong`) confirm 99% BTB hit and zero target-wrong on uncond. | Steady-state baseline; enables the IF-redirect fast paths above. |
+
+### Memory hierarchy
+| Direction | What | Result |
+| --- | --- | --- |
+| D$ Port-B observability + miss-penalty estimator | Counter Port-B accesses/hits/misses; the TB now also prints `cycles_pX` upper bounds for `X ∈ {0, 1, 3, 8}` cycles per miss to expose what would happen with a realistic DRAM. | Findings: dotprod cycles@p=8 was +247% over p=0 → memory dominated tail. |
+| D$ line size 1-word → 4-word | Same direct-mapped 64 lines, line bumped to 4 words (16 B). Spatial-locality win on stride-1 array workloads. | dotprod miss 1942→1684 (−13%), matmul 3787→3147 (−17%), crc32 essentially unchanged. |
+| D$ direct-mapped → 2-way set associative + LRU | A `CACHE_LINES` sweep (64/128/256) showed only −3% per doubling on dotprod miss-rate → bottleneck was conflict miss, not capacity. Switched to 64 sets × 2 ways × 4 words = 2 KB, 1-bit LRU per set. | dotprod miss 1684→887 (−47%, miss-rate 43.2%→22.8%); matmul 3147→1533 (−51%, 41.0%→20.0%); crc32 144→83 (−42%). Port-B miss on dotprod 8→0. cycles@p=8 dotprod −39%, matmul −42%. |
+
+### Cumulative D$ effect (1-way × 1-word baseline → 2-way × 4-word final)
+| Bench | miss baseline → final | miss_rate | cycles@p=8 |
+| --- | --- | --- | --- |
+| dotprod_32 | 1942 → 887 (−54%) | 49.2% → 22.8% | 21838 → 13398 (−39%) |
+| matmul_4x4 | 3787 → 1533 (−60%) | 49.3% → 20.0% | 43142 → 25110 (−42%) |
+| crc32_64b  |  147 →  83 (−43%) |  7.9% →  5.2% |  4664 →  4152 (−11%) |
+
+### Methodology / supporting infra
+| Direction | What |
+| --- | --- |
+| Wrong-path-store regression | `tb/programs/a2step2_robust.hex` + `tools/run_a2step2_robustness.py` + `make robust`. Any IF-redirect optimization that lets a wrong-path store retire is caught immediately (PASS = `x31 = 0xCAFEBABE` and `x6 = x7 = x8 = 0`). |
+| Observability stack | `rs_shadow` (RS sizing / wait-cycles), `ras_shadow` (now also a real predictor), BPU/BTB counters, D$ Port-B counters, D$ miss-penalty estimator — all live in the TB so each optimization can be re-justified by data, not by hand-waving. |
+| Repository hygiene | English commit messages, single-bench smoke runs (`TIMEOUT_NS=2000000`) preferred over the 1500-random regression for fast iteration. |
+
+### Next ROI targets
+The front-end and the D$ have both seen large wins. Remaining
+visible cost on `matmul_4x4` is `wait_cycles=3943` in the
+shadow RS — a real out-of-order RS with LOAD early-wakeup is now
+the highest-ROI step.
+
 ## Course Roadmap: From 5 Stages to 10 Stages
 
 This repository can also serve as the implementation base for an architecture course sequence that starts from a classic 5-stage pipeline and gradually evolves toward a deeper 10-stage design.
