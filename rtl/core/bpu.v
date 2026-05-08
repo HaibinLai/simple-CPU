@@ -343,4 +343,52 @@ module bpu #(
             ghr <= {ghr[GHR_W-2:0], upd_taken};
         end
     end
+
+    // -------- Observability: BTB hit/miss + JAL-specific stats -----
+    // Counted at upd_valid (resolution time). For uncond jumps we re-check
+    // the BTB at this same cycle to estimate whether the BTB had a useful
+    // entry when the jump was fetched. This is an upper bound (the BTB might
+    // have been allocated between fetch and EX), but for steady-state ROI it
+    // is tight enough.
+    //   stat_resolve_total      : total resolved branches/jumps  (== upd_valid)
+    //   stat_resolve_uncond     : of those, JAL/JALR
+    //   stat_btb_hit_uncond     : BTB had a valid hit AND uncond bit set
+    //   stat_btb_alloc_uncond   : BTB allocations on uncond miss
+    //   stat_btb_target_correct : hit AND stored target == actual upd_target
+    //   stat_btb_target_wrong   : hit AND stored target != upd_target (alias!)
+    reg [31:0] stat_resolve_total;
+    reg [31:0] stat_resolve_uncond;
+    reg [31:0] stat_btb_hit_uncond;
+    reg [31:0] stat_btb_alloc_uncond;
+    reg [31:0] stat_btb_target_correct;
+    reg [31:0] stat_btb_target_wrong;
+    wire upd_hit0 = btb0_valid[upd_btb_idx] && (btb0_tag[upd_btb_idx] == upd_btb_tag);
+    wire upd_hit1 = btb1_valid[upd_btb_idx] && (btb1_tag[upd_btb_idx] == upd_btb_tag);
+    wire upd_uncond_present = (upd_hit0 && btb0_uncond[upd_btb_idx]) ||
+                              (upd_hit1 && btb1_uncond[upd_btb_idx]);
+    wire [31:0] upd_btb_target_now = upd_hit0 ? btb0_target[upd_btb_idx] :
+                                                btb1_target[upd_btb_idx];
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            stat_resolve_total      <= 32'b0;
+            stat_resolve_uncond     <= 32'b0;
+            stat_btb_hit_uncond     <= 32'b0;
+            stat_btb_alloc_uncond   <= 32'b0;
+            stat_btb_target_correct <= 32'b0;
+            stat_btb_target_wrong   <= 32'b0;
+        end else if (upd_valid) begin
+            stat_resolve_total <= stat_resolve_total + 32'd1;
+            if (upd_is_uncond) begin
+                stat_resolve_uncond <= stat_resolve_uncond + 32'd1;
+                if (upd_uncond_present) begin
+                    stat_btb_hit_uncond <= stat_btb_hit_uncond + 32'd1;
+                    if (upd_btb_target_now == upd_target)
+                        stat_btb_target_correct <= stat_btb_target_correct + 32'd1;
+                    else
+                        stat_btb_target_wrong <= stat_btb_target_wrong + 32'd1;
+                end else
+                    stat_btb_alloc_uncond <= stat_btb_alloc_uncond + 32'd1;
+            end
+        end
+    end
 endmodule
