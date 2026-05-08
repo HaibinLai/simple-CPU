@@ -111,6 +111,10 @@ module tb_cpu;
     wire [31:0] dc_access = u_dut.u_dmem.stat_access;
     wire [31:0] dc_hit    = u_dut.u_dmem.stat_hit;
     wire [31:0] dc_miss   = u_dut.u_dmem.stat_miss;
+    // R4: D$ Port B (slot1 LOAD) counters
+    wire [31:0] dc_access_b = u_dut.u_dmem.stat_access_b;
+    wire [31:0] dc_hit_b    = u_dut.u_dmem.stat_hit_b;
+    wire [31:0] dc_miss_b   = u_dut.u_dmem.stat_miss_b;
 
     // CPI 拆解所需的内部信号 peek
     wire dut_stall          = u_dut.stall;
@@ -382,6 +386,33 @@ module tb_cpu;
             $display("[TB] D$ access=%0d hit=%0d miss=%0d miss_rate=%f",
                      dc_access, dc_hit, dc_miss,
                      (dc_access == 0) ? 0.0 : 1.0*dc_miss/dc_access);
+            $display("[TB] D$_b access=%0d hit=%0d miss=%0d miss_rate=%f",
+                     dc_access_b, dc_hit_b, dc_miss_b,
+                     (dc_access_b == 0) ? 0.0 : 1.0*dc_miss_b/dc_access_b);
+            // P0 sensitivity: 假设每个 D$ miss 产生 N 个额外 stall cycle，计算在
+            // “零 overlap” 假设下的 cycles 上界 (worst case 估计)。现在 dmem.v 上例
+            // miss penalty 是 0，所有 cycles 与需要补上的 N*miss 都是在零延迟
+            // 假设下算出来的。如果这里的上界趋近 cycles 本身，说明必须真
+            // 加 stall 的微架构。
+            begin : dcache_penalty_est
+                integer total_miss; integer eff1; integer eff3; integer eff8;
+                total_miss = dc_miss + dc_miss_b;
+                eff1 = cycles + total_miss * 1;
+                eff3 = cycles + total_miss * 3;
+                eff8 = cycles + total_miss * 8;
+                $display("[TB] D$ miss_penalty_est: total_miss=%0d  cycles_p0=%0d  cycles_p1=%0d (+%f%%)  cycles_p3=%0d (+%f%%)  cycles_p8=%0d (+%f%%)",
+                         total_miss, cycles,
+                         eff1, (cycles == 0) ? 0.0 : 100.0*(eff1-cycles)/cycles,
+                         eff3, (cycles == 0) ? 0.0 : 100.0*(eff3-cycles)/cycles,
+                         eff8, (cycles == 0) ? 0.0 : 100.0*(eff8-cycles)/cycles);
+                if (instrs_retired != 0) begin
+                    $display("[TB] D$ miss_penalty_est: CPI_p0=%f  CPI_p1=%f  CPI_p3=%f  CPI_p8=%f",
+                             1.0*cycles/instrs_retired,
+                             1.0*eff1/instrs_retired,
+                             1.0*eff3/instrs_retired,
+                             1.0*eff8/instrs_retired);
+                end
+            end
             $display("[TB] dual_issue=%0d single_issue=%0d dual_rate=%f",
                      c_dual_issue, c_single_issue,
                      (c_dual_issue + c_single_issue == 0) ? 0.0 :
