@@ -4,6 +4,10 @@ sim/
 *.out
 .DS_Store
 
+# Python caches
+__pycache__/
+*.pyc
+
 # 随机生成的回归测试 hex（数量大、可由工具重新生成）
 tb/programs/generated/
 

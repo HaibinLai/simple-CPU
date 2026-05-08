@@ -19,7 +19,7 @@ else
   VCD_FLAGS :=
 endif
 
-.PHONY: all run wave clean build
+.PHONY: all run wave clean build robust
 
 all: build
 
@@ -40,3 +40,8 @@ wave:
 
 clean:
 	rm -rf $(SIM_DIR)
+
+# Front-end wrong-path regression. MUST PASS before landing any IF-stage
+# optimization (slot1 JAL fast predict, active RAS, BTB-fetch hint, etc.).
+robust:
+	python3 tools/run_a2step2_robustness.py
