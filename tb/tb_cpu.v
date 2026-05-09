@@ -199,7 +199,7 @@ module tb_cpu;
                 shadow_rf[u_dut.rob_commit_rd_1] <= u_dut.rob_commit_res_1;
 
             // M3.4a observability: rename stall 计数（M3.4c 起需为 0）
-            if (u_dut.rn_stall) c_rn_stall <= c_rn_stall + 1;
+            if (u_dut.rn_block_slot0 || u_dut.rn_block_slot1) c_rn_stall <= c_rn_stall + 1;
 
             // M3.4e: flush 不变骏。flush 拉高后，下一个上升沿 rename 需
             //   复位：free_count == 16, busy == 0, map = identity。
@@ -225,7 +225,7 @@ module tb_cpu;
             if (u_dut.prf_we0) c_cdb0_total <= c_cdb0_total + 1;
             if (u_dut.prf_we1) c_cdb1_total <= c_cdb1_total + 1;
             if (prev_flush) begin
-                if (u_dut.rn_free_count != 5'd16) begin
+                if (u_dut.rn_free_count != 6'd32) begin
                     c_flush_bad_free <= c_flush_bad_free + 1;
                     if (c_flush_bad_free < 3)
                         $display("[TB][FLUSH] cyc=%0d free_count=%0d (expected 16)",

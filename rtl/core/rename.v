@@ -11,10 +11,10 @@
 `include "defines.v"
 
 module rename #(
-    parameter PRF_SIZE = 48,
+    parameter PRF_SIZE = 64,
     parameter PTAG_W   = 6,
     parameter SPEC_BASE = 32,
-    parameter SPEC_CNT  = 16
+    parameter SPEC_CNT  = 32
 )(
     input  wire                   clk,
     input  wire                   rst_n,
@@ -54,7 +54,7 @@ module rename #(
     input  wire [PTAG_W-1:0]      commit1_ptag_new,
     input  wire [PTAG_W-1:0]      commit1_ptag_old,
 
-    output wire [4:0]             free_count,
+    output wire [5:0]             free_count,
     output wire [PRF_SIZE-1:0]    busy_vec
 );
 
@@ -67,7 +67,7 @@ module rename #(
 
     reg [PTAG_W-1:0]   fl_mem [0:SPEC_CNT-1];
     reg [4:0]          fl_head, fl_tail;
-    reg [4:0]          fl_cnt;
+    reg [5:0]          fl_cnt;
     assign free_count = fl_cnt;
 
     // combinational lookups
@@ -105,7 +105,7 @@ module rename #(
     wire s0_real_alloc = s0_alloc && (s0_rd != 5'd0);
     wire s1_real_alloc = s1_alloc && (s1_rd != 5'd0);
     wire [1:0] need = {1'b0, s0_real_alloc} + {1'b0, s1_real_alloc};
-    assign stall = (fl_cnt < {3'b0, need});
+    assign stall = (fl_cnt < {4'b0, need});
 
     wire alloc0_ok = s0_real_alloc && !stall;
     wire alloc1_ok = s1_real_alloc && !stall;
@@ -124,7 +124,7 @@ module rename #(
                 fl_mem[i] <= (SPEC_BASE + i);
             fl_head <= 5'd0;
             fl_tail <= 5'd0;
-            fl_cnt  <= SPEC_CNT[4:0];
+            fl_cnt  <= SPEC_CNT[5:0];
         end else if (flush) begin
             // M3.4f: 完整 flush 路径暂用 identity 恢复（与 free_list = {32..47} 一致，
             // 避免 spec ptag 既被 arch_map 占用又出现在 free_list 的双重分配问题）。
@@ -137,7 +137,7 @@ module rename #(
                 fl_mem[i] <= (SPEC_BASE + i);
             fl_head <= 5'd0;
             fl_tail <= 5'd0;
-            fl_cnt  <= SPEC_CNT[4:0];
+            fl_cnt  <= SPEC_CNT[5:0];
         end else begin
             // M3.4f: commit 时更新 RRAT (slot1 后序胜)
             if (commit0_valid && commit0_rd != 5'd0) arch_map[commit0_rd] <= commit0_ptag_new;
@@ -179,10 +179,10 @@ module rename #(
             endcase
 
             fl_cnt <= fl_cnt
-                      - (alloc0_ok ? 5'd1 : 5'd0)
-                      - (alloc1_ok ? 5'd1 : 5'd0)
-                      + (push0_ok  ? 5'd1 : 5'd0)
-                      + (push1_ok  ? 5'd1 : 5'd0);
+                      - (alloc0_ok ? 6'd1 : 6'd0)
+                      - (alloc1_ok ? 6'd1 : 6'd0)
+                      + (push0_ok  ? 6'd1 : 6'd0)
+                      + (push1_ok  ? 6'd1 : 6'd0);
         end
     end
 

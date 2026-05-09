@@ -108,8 +108,13 @@ module cpu_top (
     // IFQ backpressure stall（IFQ 即将满，无法接收 2 条新指令）
     wire        ifq_almost_full;
     wire        ifq_full;
-    // 综合冻结条件：load-use stall 或 IFQ 反压
-    wire        if_freeze = stall || ifq_almost_full;
+    // OoO Stage1-bis: rename free-list stall (分 slot)
+    // 跳过全部阻塑：仅 free=0 且 slot0 需分配时 stall slot0。
+    //               free<2 且两者都需分配时 stall slot1 (slot0 仍 pop)。
+    wire        rn_block_slot0;     // 在后面 forward decl
+    wire        rn_block_slot1;
+    // PC 冻结只需在 slot0 被阻时生效 (slot1 单独阻不影响 IFQ 消费 1 条)
+    wire if_freeze = stall || ifq_almost_full || rn_block_slot0;
 
     wire [31:0] imem_rdata0, imem_rdata1;
 
@@ -348,10 +353,15 @@ module cpu_top (
     wire [BPU_GHR_W-1:0] id1_id2_pred_ghr1_unused;
 
     // pop 控制：当 backend 接受 slot0 时（无 stall、无 redirect、有效），消费一条
-    wire ifq_pop_slot0  = id1_id2_valid0 && !stall && !ex_redirect;
+    // OoO Stage1-bis step3: 加入 rn_block_slot0/slot1 闸门。注意 rn_block_*
+    // 由 cpu_top 在 "would-be alloc" + rn_free_count 上计算，所以 ifq_pop_*
+    // 不会反馈进 rename，避免组合环。
+    wire ifq_pop_req_slot0 = id1_id2_valid0 && !stall && !ex_redirect;
+    wire ifq_pop_slot0  = ifq_pop_req_slot0 && !rn_block_slot0;
     // R2: 双发射 — 仅当 slot0 pop 且 slot1 满足配对条件时才 pop slot1
     wire id2_issue_slot1;
-    wire ifq_pop_slot1  = ifq_pop_slot0 && id2_issue_slot1;
+    wire ifq_pop_req_slot1 = ifq_pop_req_slot0 && id2_issue_slot1;
+    wire ifq_pop_slot1  = ifq_pop_req_slot1 && !rn_block_slot0 && !rn_block_slot1;
 
     wire [3:0]  ifq_count;
 
@@ -593,7 +603,7 @@ module cpu_top (
     // 旧的 id_*_data wire 与 id_ex_rs* (32-bit data) 流水线寄存器已一并删除。
 
     // 物理寄存器文件（48 项，前 32 槽 = 架构寄存器；we0/we1 写 arch idx）
-    prf #(.DEPTH(48), .AW(6)) u_prf (
+    prf #(.DEPTH(64), .AW(6)) u_prf (
         .clk      (clk),
         .rst_n    (rst_n),
         .we0      (prf_we0),
@@ -745,7 +755,7 @@ module cpu_top (
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
-        end else if (ex_redirect || stall) begin
+        end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1) begin
             // 刷新/气泡 slot1
             id1_ex_instr      <= 32'h00000013;
             id1_ex_rd         <= 5'b0;
@@ -805,7 +815,7 @@ module cpu_top (
             id_ex_rd_ptag    <= 6'b0;
             id_ex_rs1_ptag   <= 6'b0;
             id_ex_rs2_ptag   <= 6'b0;
-        end else if (ex_redirect || stall) begin
+        end else if (ex_redirect || stall || rn_block_slot0) begin
             // 刷新/气泡 ID/EX：清控制信号
             id_ex_instr       <= 32'h00000013;
             id_ex_rd          <= 5'b0;
@@ -1310,12 +1320,12 @@ module cpu_top (
     assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
     assign prf_wa1 = {1'b0, id1_ex_rd};
     assign prf_wd1 = slot1_wb_data;
-    // 读地址：暂保持 arch idx（step1 实际验证）。
-    // 切到 spec ptag 仍有未解决的 rename-map 可见性 race，留待后续。
-    assign prf_ra0 = {1'b0, id_ex_rs1_addr};
-    assign prf_ra1 = {1'b0, id_ex_rs2_addr};
-    assign prf_ra2 = {1'b0, id1_ex_rs1_addr};
-    assign prf_ra3 = {1'b0, id1_ex_rs2_addr};
+    // 读地址：使用 spec ptag（OoO 准备）。Forwarding 仍按 arch id 命中较新值，
+    // 不命中时由 PRF[ptag] 提供 in-flight 推测值（we2/we3 已 mirror）。
+    assign prf_ra0 = id_ex_rs1_ptag;
+    assign prf_ra1 = id_ex_rs2_ptag;
+    assign prf_ra2 = id1_ex_rs1_ptag;
+    assign prf_ra3 = id1_ex_rs2_ptag;
 
     // we2/we3: 镜像写到 spec ptag。
     assign prf_we2 = prf_we0 && (mem_wb_rd_ptag != {1'b0, mem_wb_rd});
@@ -1324,6 +1334,7 @@ module cpu_top (
     assign prf_we3 = prf_we1 && (id1_ex_rd_ptag != {1'b0, id1_ex_rd});
     assign prf_wa3 = id1_ex_rd_ptag;
     assign prf_wd3 = slot1_wb_data;
+
 
     // ============================================================
     // Tomasulo Phase T1 — Common Data Bus (CDB) abstraction
@@ -1373,7 +1384,7 @@ module cpu_top (
     // Forward-declare rename outputs the shadow RS reads (real declarations
     // + instance live further below; Verilog wires can be forward-referenced
     // but indexed bit-select wants the decl already in scope).
-    wire [47:0] rn_busy_vec;
+    wire [63:0] rn_busy_vec;
 
     // Eligible dispatch into shadow RS = slot0 issuing an ALU op
     //   (not load, not store, not branch, not jump). Limit to ALU so
@@ -1469,11 +1480,22 @@ module cpu_top (
     // (T2a 已把 rn_busy_vec 上提到 shadow RS 段供 bit-select 使用)
     wire [5:0]  rn_s0_rd_ptag_old;
     wire [5:0]  rn_s1_rd_ptag_old;
-    wire        rn_stall;
-    wire [4:0]  rn_free_count;
+    // rn_block_slot0/1 在文件顶部 forward-declared
+    wire [5:0]  rn_free_count;
 
-    wire        rn_s0_alloc = ifq_pop_slot0 && id_reg_write && (id_rd != 5'd0);
-    wire        rn_s1_alloc = ifq_pop_slot1 && id1_reg_write && (id1_rd != 5'd0);
+    wire        rn_s0_alloc_req = ifq_pop_req_slot0 && id_reg_write && (id_rd != 5'd0);
+    wire        rn_s1_alloc_req = ifq_pop_req_slot1 && id1_reg_write && (id1_rd != 5'd0);
+
+    // OoO Stage1-bis step3: per-slot rename free-list block
+    //   slot0 阻塞条件：slot0 需分配但 free_count == 0
+    //   slot1 阻塞条件：slot1 需分配但 free_count < (slot0_alloc ? 2 : 1)
+    //   注意计算用 *_alloc_req (would-be, 未带 rn_block_*)，避免组合环。
+    assign rn_block_slot0 = rn_s0_alloc_req && (rn_free_count == 6'd0);
+    assign rn_block_slot1 = rn_s1_alloc_req && (rn_free_count < (rn_s0_alloc_req ? 6'd2 : 6'd1));
+
+    // 实际传给 rename 的 alloc 信号（被 block 时 = 0，rename 内部 fl_head/map 不动）
+    wire        rn_s0_alloc = rn_s0_alloc_req && !rn_block_slot0;
+    wire        rn_s1_alloc = rn_s1_alloc_req && !rn_block_slot0 && !rn_block_slot1;
 
     rename u_rename (
         .clk                (clk),
