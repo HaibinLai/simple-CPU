@@ -863,31 +863,31 @@ module cpu_top (
     end
 
     // ---------------- EX1 ----------------
-    // 前递选择
+    // 前递选择 (OoO Stage 3: ptag-based)
     wire [1:0] fwd_a, fwd_b;
     forwarding u_fwd (
-        .id_ex_rs1        (id_ex_rs1_addr),
-        .id_ex_rs2        (id_ex_rs2_addr),
-        .ex_mem_reg_write (ex_mem_reg_write & ex_mem_valid & ~ex_mem_mem_read),
-        .ex_mem_rd        (ex_mem_rd),
-        .ex2_agu_reg_write(ex2_agu_reg_write & ex2_agu_valid & ~ex2_agu_mem_read),
-        .ex2_agu_rd       (ex2_agu_rd),
-        .agu_mem_reg_write(agu_mem_reg_write & agu_mem_valid),
-        .agu_mem_rd       (agu_mem_rd),
-        .mem_wb_reg_write (mem_wb_reg_write & mem_wb_valid),
-        .mem_wb_rd        (mem_wb_rd),
-        .fwd_a            (fwd_a),
-        .fwd_b            (fwd_b)
+        .id_ex_rs1_ptag    (id_ex_rs1_ptag),
+        .id_ex_rs2_ptag    (id_ex_rs2_ptag),
+        .ex_mem_reg_write  (ex_mem_reg_write & ex_mem_valid & ~ex_mem_mem_read),
+        .ex_mem_rd_ptag    (ex_mem_rd_ptag),
+        .ex2_agu_reg_write (ex2_agu_reg_write & ex2_agu_valid & ~ex2_agu_mem_read),
+        .ex2_agu_rd_ptag   (ex2_agu_rd_ptag),
+        .agu_mem_reg_write (agu_mem_reg_write & agu_mem_valid),
+        .agu_mem_rd_ptag   (agu_mem_rd_ptag),
+        .mem_wb_reg_write  (mem_wb_reg_write & mem_wb_valid),
+        .mem_wb_rd_ptag    (mem_wb_rd_ptag),
+        .fwd_a             (fwd_a),
+        .fwd_b             (fwd_b)
     );
 
     // AGU/MEM 前递数据：普通 ALU 指令前递地址/ALU结果，load 前递扩展后的读数据
     wire [31:0] agu_mem_fwd_data = agu_mem_mem_read ? mem_load_data : agu_mem_alu_y;
     wire        fwd_a_from_agu = (agu_mem_reg_write & agu_mem_valid) &&
-                                 (agu_mem_rd != 5'd0) &&
-                                 (agu_mem_rd == id_ex_rs1_addr);
+                                 (agu_mem_rd_ptag != 6'd0) &&
+                                 (agu_mem_rd_ptag == id_ex_rs1_ptag);
     wire        fwd_b_from_agu = (agu_mem_reg_write & agu_mem_valid) &&
-                                 (agu_mem_rd != 5'd0) &&
-                                 (agu_mem_rd == id_ex_rs2_addr);
+                                 (agu_mem_rd_ptag != 6'd0) &&
+                                 (agu_mem_rd_ptag == id_ex_rs2_ptag);
 
     // 前递后的 rs1/rs2（这是“逐表达式中的真实寄存器值”）
     // OoO Stage 1: baseline operand source 由 regfile-cached `id_ex_rs*` 切到
@@ -918,25 +918,25 @@ module cpu_top (
     );
 
     // ===== Milestone 2: Slot1 ALU Datapath (Phase 2C) =====
-    // Slot1 forwarding: 完整的 forwarding 网络，与 slot0 同等
+    // Slot1 forwarding (OoO Stage 3: ptag-based)
     // 优先级（最近的 in-flight 优先）：id_ex (slot0 同 cycle EX) > ex_mem > ex2_agu > agu_mem > mem_wb
     // slot1 没有 load 数据来源，但 load 依赖已被配对规则禁止（id1_no_load_use_hazard）
-    // OoO Stage 1: baseline operand source 切到 PRF[id1_ex_rs*_ptag] = prf_r2/prf_r3
+    // baseline operand source = PRF[id1_ex_rs*_ptag] = prf_r2/prf_r3
     wire [31:0] slot1_rs1_base = prf_r2;
     wire [31:0] slot1_rs2_base = prf_r3;
     wire [31:0] slot1_rs1_fwd =
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
-        (id1_ex_rs1_addr != 5'd0 && id1_ex_rs1_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
+        (id1_ex_rs1_ptag != 6'd0 && id1_ex_rs1_ptag == id_ex_rd_ptag  && id_ex_valid  && id_ex_reg_write  && !id_ex_mem_read)  ? ex_alu_y :
+        (id1_ex_rs1_ptag != 6'd0 && id1_ex_rs1_ptag == ex_mem_rd_ptag && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
+        (id1_ex_rs1_ptag != 6'd0 && id1_ex_rs1_ptag == ex2_agu_rd_ptag && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
+        (id1_ex_rs1_ptag != 6'd0 && id1_ex_rs1_ptag == agu_mem_rd_ptag && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
+        (id1_ex_rs1_ptag != 6'd0 && id1_ex_rs1_ptag == mem_wb_rd_ptag  && mem_wb_valid  && mem_wb_reg_write)  ? wb_data :
                            slot1_rs1_base;
     wire [31:0] slot1_rs2_fwd =
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == id_ex_rd && id_ex_valid && id_ex_reg_write && !id_ex_mem_read) ? ex_alu_y :
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex_mem_rd && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == ex2_agu_rd && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == agu_mem_rd && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
-        (id1_ex_rs2_addr != 5'd0 && id1_ex_rs2_addr == mem_wb_rd && mem_wb_valid && mem_wb_reg_write) ? wb_data :
+        (id1_ex_rs2_ptag != 6'd0 && id1_ex_rs2_ptag == id_ex_rd_ptag  && id_ex_valid  && id_ex_reg_write  && !id_ex_mem_read)  ? ex_alu_y :
+        (id1_ex_rs2_ptag != 6'd0 && id1_ex_rs2_ptag == ex_mem_rd_ptag && ex_mem_valid && ex_mem_reg_write && !ex_mem_mem_read) ? ex_mem_alu_y :
+        (id1_ex_rs2_ptag != 6'd0 && id1_ex_rs2_ptag == ex2_agu_rd_ptag && ex2_agu_valid && ex2_agu_reg_write && !ex2_agu_mem_read) ? ex2_agu_alu_y :
+        (id1_ex_rs2_ptag != 6'd0 && id1_ex_rs2_ptag == agu_mem_rd_ptag && agu_mem_valid && agu_mem_reg_write) ? agu_mem_fwd_data :
+        (id1_ex_rs2_ptag != 6'd0 && id1_ex_rs2_ptag == mem_wb_rd_ptag  && mem_wb_valid  && mem_wb_reg_write)  ? wb_data :
                            slot1_rs2_base;
 
     // Slot1 ALU input (ALU-only, so a_src is always RS1, b_src is IMM or RS2)
