@@ -23,10 +23,15 @@ module prf #(
     input  wire [AW-1:0] ra1,
     input  wire [AW-1:0] ra2,
     input  wire [AW-1:0] ra3,
+    // T2b-step1: extra read ports for RS dispatch operand capture (ra4/ra5)
+    input  wire [AW-1:0] ra4,
+    input  wire [AW-1:0] ra5,
     output wire [31:0]   rd0,
     output wire [31:0]   rd1,
     output wire [31:0]   rd2,
-    output wire [31:0]   rd3
+    output wire [31:0]   rd3,
+    output wire [31:0]   rd4,
+    output wire [31:0]   rd5
 );
 
     reg [31:0] regs [0:DEPTH-1];
@@ -66,5 +71,13 @@ module prf #(
     assign rd3 = (we3 && (wa3 == ra3)) ? wd3 :
                  (we2 && (wa2 == ra3)) ? wd2 :
                  (we0 && (wa0 == ra3)) ? wd0 : regs[ra3];
+    // T2b-step1: ra4/ra5 use the same write-bypass priority (we3 > we2 > we0).
+    // we1 still excluded to avoid the slot1-EX combinational loop.
+    assign rd4 = (we3 && (wa3 == ra4)) ? wd3 :
+                 (we2 && (wa2 == ra4)) ? wd2 :
+                 (we0 && (wa0 == ra4)) ? wd0 : regs[ra4];
+    assign rd5 = (we3 && (wa3 == ra5)) ? wd3 :
+                 (we2 && (wa2 == ra5)) ? wd2 :
+                 (we0 && (wa0 == ra5)) ? wd0 : regs[ra5];
 
 endmodule

@@ -46,12 +46,30 @@ module rs_shadow #(
     input  wire                  alloc_rs2_ready,
     input  wire [PTAG_W-1:0]     alloc_rd_ptag,
     input  wire [ROB_W-1:0]      alloc_rob_tag,
+    // T2b-step1: per-alloc payload (operand values, ALU op, PC).
+    // alloc_rs*_val should be valid when alloc_rs*_ready is 1 (PRF-read result).
+    input  wire [31:0]           alloc_rs1_val,
+    input  wire [31:0]           alloc_rs2_val,
+    input  wire [3:0]            alloc_alu_op,
+    input  wire [31:0]           alloc_pc,
 
     // CDB lanes (from cpu_top T1 wires)
     input  wire                  cdb0_valid,
     input  wire [PTAG_W-1:0]     cdb0_ptag,
+    input  wire [31:0]           cdb0_value,
     input  wire                  cdb1_valid,
     input  wire [PTAG_W-1:0]     cdb1_ptag,
+    input  wire [31:0]           cdb1_value,
+
+    // T2b-step1: registered issue port (NOT yet driving EX1; observability +
+    // shadow-ALU cross-check). One issue per cycle.
+    output reg                   issue_v_o,
+    output reg  [31:0]           issue_rs1_val_o,
+    output reg  [31:0]           issue_rs2_val_o,
+    output reg  [3:0]            issue_alu_op_o,
+    output reg  [PTAG_W-1:0]     issue_rd_ptag_o,
+    output reg  [ROB_W-1:0]      issue_rob_tag_o,
+    output reg  [31:0]           issue_pc_o,
 
     // Observability counters
     output reg  [31:0]           alloc_count,
@@ -71,6 +89,11 @@ module rs_shadow #(
     reg [PTAG_W-1:0]     rd      [0:DEPTH-1];
     reg [ROB_W-1:0]      rob     [0:DEPTH-1];
     reg [31:0]           age     [0:DEPTH-1];   // cycles since alloc (saturating)
+    // T2b-step1: per-entry payload (operand values, ALU op, PC)
+    reg [31:0]           rs1_val [0:DEPTH-1];
+    reg [31:0]           rs2_val [0:DEPTH-1];
+    reg [3:0]            alu_op  [0:DEPTH-1];
+    reg [31:0]           pc_e    [0:DEPTH-1];
 
     // ---- combinational helpers ----
     integer i;
@@ -161,6 +184,10 @@ module rs_shadow #(
                 rs2[w]     <= {PTAG_W{1'b0}};
                 rd[w]      <= {PTAG_W{1'b0}};
                 rob[w]     <= {ROB_W{1'b0}};
+                rs1_val[w] <= 32'b0;
+                rs2_val[w] <= 32'b0;
+                alu_op[w]  <= 4'b0;
+                pc_e[w]    <= 32'b0;
             end
             alloc_count          <= 32'b0;
             issue_count          <= 32'b0;
@@ -168,6 +195,13 @@ module rs_shadow #(
             wait_cycles_total    <= 32'b0;
             ready_at_alloc_count <= 32'b0;
             max_occupancy        <= 32'b0;
+            issue_v_o            <= 1'b0;
+            issue_rs1_val_o      <= 32'b0;
+            issue_rs2_val_o      <= 32'b0;
+            issue_alu_op_o       <= 4'b0;
+            issue_rd_ptag_o      <= {PTAG_W{1'b0}};
+            issue_rob_tag_o      <= {ROB_W{1'b0}};
+            issue_pc_o           <= 32'b0;
         end else if (flush) begin
             for (w = 0; w < DEPTH; w = w + 1) begin
                 v[w]       <= 1'b0;
@@ -175,22 +209,51 @@ module rs_shadow #(
                 rs2_rdy[w] <= 1'b0;
                 age[w]     <= 32'b0;
             end
+            issue_v_o <= 1'b0;
             // counters retained across flushes
         end else begin
-            // 1) wakeup (latch ready bits set this cycle)
+            // 1) wakeup (latch ready bits + value set this cycle)
             for (w = 0; w < DEPTH; w = w + 1) begin
-                if (wake_rs1[w]) rs1_rdy[w] <= 1'b1;
-                if (wake_rs2[w]) rs2_rdy[w] <= 1'b1;
+                if (wake_rs1[w]) begin
+                    rs1_rdy[w] <= 1'b1;
+                    // Pick the matching CDB lane's value. cdb0 wins on tie
+                    // (matches arbitrary policy; both lanes can't have the
+                    // same ptag in T1).
+                    rs1_val[w] <= (cdb0_valid && (cdb0_ptag == rs1[w])) ?
+                                  cdb0_value : cdb1_value;
+                end
+                if (wake_rs2[w]) begin
+                    rs2_rdy[w] <= 1'b1;
+                    rs2_val[w] <= (cdb0_valid && (cdb0_ptag == rs2[w])) ?
+                                  cdb0_value : cdb1_value;
+                end
                 // age++ on every cycle the entry is valid (saturate at 32'hFFFF_FFFF)
                 if (v[w] && age[w] != 32'hFFFF_FFFF)
                     age[w] <= age[w] + 32'd1;
             end
 
-            // 2) issue (clear valid)
+            // 2) issue (clear valid + register issue port outputs)
+            issue_v_o <= 1'b0;   // default deassert
             if (issue_v) begin
-                v[issue_idx]   <= 1'b0;
-                issue_count    <= issue_count + 32'd1;
+                v[issue_idx]      <= 1'b0;
+                issue_count       <= issue_count + 32'd1;
                 wait_cycles_total <= wait_cycles_total + age[issue_idx];
+                // T2b-step1: register the issue payload. Use post-wakeup
+                // operand value: if wake_rs* fires this cycle, the new value
+                // is on cdb*_value (rs*_val itself updates after this clk).
+                issue_v_o       <= 1'b1;
+                issue_rs1_val_o <= wake_rs1[issue_idx] ?
+                                   ((cdb0_valid && (cdb0_ptag == rs1[issue_idx])) ?
+                                    cdb0_value : cdb1_value) :
+                                   rs1_val[issue_idx];
+                issue_rs2_val_o <= wake_rs2[issue_idx] ?
+                                   ((cdb0_valid && (cdb0_ptag == rs2[issue_idx])) ?
+                                    cdb0_value : cdb1_value) :
+                                   rs2_val[issue_idx];
+                issue_alu_op_o  <= alu_op[issue_idx];
+                issue_rd_ptag_o <= rd[issue_idx];
+                issue_rob_tag_o <= rob[issue_idx];
+                issue_pc_o      <= pc_e[issue_idx];
             end
 
             // 3) alloc (write into a free slot; if issue cleared a slot
@@ -215,6 +278,20 @@ module rs_shadow #(
                     rd[free_idx]     <= alloc_rd_ptag;
                     rob[free_idx]    <= alloc_rob_tag;
                     age[free_idx]    <= 32'b0;
+                    // T2b-step1: capture operand values + ALU op + PC.
+                    // For each rs: prefer alloc-ready PRF value; else snag
+                    // a same-cycle CDB hit; else leave 0 (will be filled at
+                    // wakeup).
+                    rs1_val[free_idx] <= alloc_rs1_ready ? alloc_rs1_val :
+                                         (cdb0_valid && cdb0_ptag == alloc_rs1_ptag) ? cdb0_value :
+                                         (cdb1_valid && cdb1_ptag == alloc_rs1_ptag) ? cdb1_value :
+                                         32'b0;
+                    rs2_val[free_idx] <= alloc_rs2_ready ? alloc_rs2_val :
+                                         (cdb0_valid && cdb0_ptag == alloc_rs2_ptag) ? cdb0_value :
+                                         (cdb1_valid && cdb1_ptag == alloc_rs2_ptag) ? cdb1_value :
+                                         32'b0;
+                    alu_op[free_idx]  <= alloc_alu_op;
+                    pc_e[free_idx]    <= alloc_pc;
                 end else if (issue_v) begin
                     v[issue_idx]      <= 1'b1;
                     rs1[issue_idx]    <= alloc_rs1_ptag;
@@ -228,6 +305,16 @@ module rs_shadow #(
                     rd[issue_idx]     <= alloc_rd_ptag;
                     rob[issue_idx]    <= alloc_rob_tag;
                     age[issue_idx]    <= 32'b0;
+                    rs1_val[issue_idx] <= alloc_rs1_ready ? alloc_rs1_val :
+                                          (cdb0_valid && cdb0_ptag == alloc_rs1_ptag) ? cdb0_value :
+                                          (cdb1_valid && cdb1_ptag == alloc_rs1_ptag) ? cdb1_value :
+                                          32'b0;
+                    rs2_val[issue_idx] <= alloc_rs2_ready ? alloc_rs2_val :
+                                          (cdb0_valid && cdb0_ptag == alloc_rs2_ptag) ? cdb0_value :
+                                          (cdb1_valid && cdb1_ptag == alloc_rs2_ptag) ? cdb1_value :
+                                          32'b0;
+                    alu_op[issue_idx]  <= alloc_alu_op;
+                    pc_e[issue_idx]    <= alloc_pc;
                 end
                 alloc_count <= alloc_count + 32'd1;
                 if (alloc_rs1_ready && alloc_rs2_ready)

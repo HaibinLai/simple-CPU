@@ -597,6 +597,9 @@ module cpu_top (
     wire [31:0] prf_r0, prf_r1, prf_r2, prf_r3;
     // M3.4c PRF read addresses (sourced from EX-stage rs ptag pipeline regs)
     wire [5:0]  prf_ra0, prf_ra1, prf_ra2, prf_ra3;
+    // T2b-step1: extra PRF read ports for shadow-RS dispatch operand capture
+    wire [5:0]  prf_ra4, prf_ra5;
+    wire [31:0] prf_r4,  prf_r5;
     
     // OoO Stage 2: 删除架构 regfile —— PRF 成为唯一寄存器存储。
     // ID2 阶段不再读寄存器；EX1 通过 prf_r0..3 (arch idx 索引) 拿到操作数。
@@ -622,10 +625,14 @@ module cpu_top (
         .ra1      (prf_ra1),
         .ra2      (prf_ra2),
         .ra3      (prf_ra3),
+        .ra4      (prf_ra4),
+        .ra5      (prf_ra5),
         .rd0      (prf_r0),
         .rd1      (prf_r1),
         .rd2      (prf_r2),
-        .rd3      (prf_r3)
+        .rd3      (prf_r3),
+        .rd4      (prf_r4),
+        .rd5      (prf_r5)
     );
 
     // ===== Milestone 2: Slot1 ID/EX Pipeline Registers (Phase 2B) =====
@@ -1404,6 +1411,20 @@ module cpu_top (
     wire [31:0] rs_sh_wait_cycles_total, rs_sh_ready_at_alloc_count;
     wire [31:0] rs_sh_max_occupancy;
 
+    // T2b-step1: extra PRF read ports for capturing operand values at the
+    // shadow-RS dispatch instant. ra4/ra5 read by rename's slot0 ptags so
+    // that prf_r4/r5 are valid the same cycle alloc_valid asserts.
+    assign prf_ra4 = rn_s0_rs1_ptag;
+    assign prf_ra5 = rn_s0_rs2_ptag;
+
+    // T2b-step1: shadow-RS issue port wires (registered inside rs_shadow)
+    wire        rs_sh_issue_v;
+    wire [31:0] rs_sh_issue_rs1_val, rs_sh_issue_rs2_val;
+    wire [3:0]  rs_sh_issue_alu_op;
+    wire [5:0]  rs_sh_issue_rd_ptag;
+    wire [3:0]  rs_sh_issue_rob_tag;
+    wire [31:0] rs_sh_issue_pc;
+
     rs_shadow #(.DEPTH(4), .PTAG_W(6), .ROB_W(4)) u_rs_shadow (
         .clk                  (clk),
         .rst_n                (rst_n),
@@ -1415,16 +1436,40 @@ module cpu_top (
         .alloc_rs2_ready      (rs_sh_alloc_rs2_rdy),
         .alloc_rd_ptag        (rn_s0_rd_ptag_new),
         .alloc_rob_tag        (rob_alloc_tag_0),
+        .alloc_rs1_val        (prf_r4),
+        .alloc_rs2_val        (prf_r5),
+        .alloc_alu_op         (id_alu_op),
+        .alloc_pc             (id1_id2_pc0),
         .cdb0_valid           (cdb0_valid),
         .cdb0_ptag            (cdb0_ptag),
+        .cdb0_value           (cdb0_value),
         .cdb1_valid           (cdb1_valid),
         .cdb1_ptag            (cdb1_ptag),
+        .cdb1_value           (cdb1_value),
+        .issue_v_o            (rs_sh_issue_v),
+        .issue_rs1_val_o      (rs_sh_issue_rs1_val),
+        .issue_rs2_val_o      (rs_sh_issue_rs2_val),
+        .issue_alu_op_o       (rs_sh_issue_alu_op),
+        .issue_rd_ptag_o      (rs_sh_issue_rd_ptag),
+        .issue_rob_tag_o      (rs_sh_issue_rob_tag),
+        .issue_pc_o           (rs_sh_issue_pc),
         .alloc_count          (rs_sh_alloc_count),
         .issue_count          (rs_sh_issue_count),
         .full_stall_count     (rs_sh_full_stall_count),
         .wait_cycles_total    (rs_sh_wait_cycles_total),
         .ready_at_alloc_count (rs_sh_ready_at_alloc_count),
         .max_occupancy        (rs_sh_max_occupancy)
+    );
+
+    // T2b-step1: shadow ALU driven by registered RS issue port. Pure
+    // observability for now; result feeds nothing in the real pipeline.
+    // Visible in waveforms as rs_sh_alu_y_w.
+    wire [31:0] rs_sh_alu_y_w;
+    alu u_rs_sh_alu (
+        .op (rs_sh_issue_alu_op),
+        .a  (rs_sh_issue_rs1_val),
+        .b  (rs_sh_issue_rs2_val),
+        .y  (rs_sh_alu_y_w)
     );
 
     // ============================================================
