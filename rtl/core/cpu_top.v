@@ -679,6 +679,8 @@ module cpu_top (
     reg [3:0]  id_ex_rob_tag;
     reg [5:0]  id_ex_rd_ptag;
     reg [5:0]  id_ex_rs1_ptag, id_ex_rs2_ptag;
+    reg        id_ex_from_rs;
+    reg [31:0] id_ex_rs1_val, id_ex_rs2_val;
 
     // T2b-step2: rs_shadow issue/peek wires need to be in scope before the
     // ID/EX and EX1 logic that consumes them.
@@ -843,6 +845,9 @@ module cpu_top (
             id_ex_rd_ptag    <= 6'b0;
             id_ex_rs1_ptag   <= 6'b0;
             id_ex_rs2_ptag   <= 6'b0;
+            id_ex_from_rs    <= 1'b0;
+            id_ex_rs1_val    <= 32'b0;
+            id_ex_rs2_val    <= 32'b0;
         end else if (ex_redirect || stall || rn_block_slot0) begin
             // 刷新/气泡 ID/EX：清控制信号
             id_ex_instr       <= 32'h00000013;
@@ -859,6 +864,7 @@ module cpu_top (
             id_ex_pred_taken  <= 1'b0;
             id_ex_pred_target <= 32'b0;
             id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
+            id_ex_from_rs     <= 1'b0;
         end else if (rs_take_ex1) begin
             id_ex_pc          <= rs_sh_issue_peek_pc;
             id_ex_instr       <= rs_sh_issue_peek_instr;
@@ -887,6 +893,9 @@ module cpu_top (
             id_ex_rd_ptag     <= rs_sh_issue_peek_rd_ptag;
             id_ex_rs1_ptag    <= 6'b0;
             id_ex_rs2_ptag    <= 6'b0;
+            id_ex_from_rs     <= 1'b1;
+            id_ex_rs1_val     <= rs_sh_issue_peek_rs1_val;
+            id_ex_rs2_val     <= rs_sh_issue_peek_rs2_val;
         end else begin
             id_ex_pc          <= id1_id2_pc0;
             id_ex_instr       <= id_instr;
@@ -915,6 +924,9 @@ module cpu_top (
             id_ex_rd_ptag     <= rn_s0_rd_ptag_new;   // M3.4b: 携带 rename ptag
             id_ex_rs1_ptag    <= rn_s0_rs1_ptag;       // M3.4c: 携带 rs ptag
             id_ex_rs2_ptag    <= rn_s0_rs2_ptag;
+            id_ex_from_rs     <= 1'b0;
+            id_ex_rs1_val     <= 32'b0;
+            id_ex_rs2_val     <= 32'b0;
         end
     end
 
@@ -962,8 +974,8 @@ module cpu_top (
         (fwd_b == 2'b11) ? (fwd_b_from_agu ? agu_mem_fwd_data : wb_data) :
                            ex_rs2_base;
 
-    wire [31:0] ex_a = (id_ex_a_src == `ASRC_PC ) ? id_ex_pc  : ex_rs1_fwd;
-    wire [31:0] ex_b = (id_ex_b_src == `BSRC_IMM) ? id_ex_imm : ex_rs2_fwd;
+    wire [31:0] ex_a = (id_ex_a_src == `ASRC_PC ) ? id_ex_pc  : (id_ex_from_rs ? id_ex_rs1_val : ex_rs1_fwd);
+    wire [31:0] ex_b = (id_ex_b_src == `BSRC_IMM) ? id_ex_imm : (id_ex_from_rs ? id_ex_rs2_val : ex_rs2_fwd);
 
     wire [31:0] ex_alu_y;
     alu u_alu (
