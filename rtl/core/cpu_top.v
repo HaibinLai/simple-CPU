@@ -360,7 +360,9 @@ module cpu_top (
     wire ifq_pop_slot0  = ifq_pop_req_slot0 && !rn_block_slot0;
     // R2: 双发射 — 仅当 slot0 pop 且 slot1 满足配对条件时才 pop slot1
     wire id2_issue_slot1;
-    wire ifq_pop_req_slot1 = ifq_pop_req_slot0 && id2_issue_slot1;
+    wire rs_sh_issue_peek_v;
+    wire rs_take_ex1;
+    wire ifq_pop_req_slot1 = ifq_pop_req_slot0 && id2_issue_slot1 && !rs_take_ex1;
     wire ifq_pop_slot1  = ifq_pop_req_slot1 && !rn_block_slot0 && !rn_block_slot1;
 
     wire [3:0]  ifq_count;
@@ -678,6 +680,25 @@ module cpu_top (
     reg [5:0]  id_ex_rd_ptag;
     reg [5:0]  id_ex_rs1_ptag, id_ex_rs2_ptag;
 
+    // T2b-step2: rs_shadow issue/peek wires need to be in scope before the
+    // ID/EX and EX1 logic that consumes them.
+    wire        rs_sh_issue_v;
+    wire [31:0] rs_sh_issue_rs1_val, rs_sh_issue_rs2_val;
+    wire [3:0]  rs_sh_issue_alu_op;
+    wire [5:0]  rs_sh_issue_rd_ptag;
+    wire [3:0]  rs_sh_issue_rob_tag;
+    wire [31:0] rs_sh_issue_pc;
+    wire [31:0] rs_sh_issue_peek_rs1_val, rs_sh_issue_peek_rs2_val;
+    wire [3:0]  rs_sh_issue_peek_alu_op;
+    wire [31:0] rs_sh_issue_peek_imm;
+    wire        rs_sh_issue_peek_a_src, rs_sh_issue_peek_b_src;
+    wire [1:0]  rs_sh_issue_peek_wb_sel;
+    wire [4:0]  rs_sh_issue_peek_rd_arch;
+    wire [31:0] rs_sh_issue_peek_instr;
+    wire [5:0]  rs_sh_issue_peek_rd_ptag;
+    wire [3:0]  rs_sh_issue_peek_rob_tag;
+    wire [31:0] rs_sh_issue_peek_pc;
+
     // 冒险检测（load-use）
     hazard u_hazard (
         .id_ex_mem_read (id_ex_mem_read),
@@ -762,7 +783,7 @@ module cpu_top (
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
-        end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1) begin
+        end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1 || rs_take_ex1) begin
             // 刷新/气泡 slot1
             id1_ex_instr      <= 32'h00000013;
             id1_ex_rd         <= 5'b0;
@@ -838,6 +859,34 @@ module cpu_top (
             id_ex_pred_taken  <= 1'b0;
             id_ex_pred_target <= 32'b0;
             id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
+        end else if (rs_take_ex1) begin
+            id_ex_pc          <= rs_sh_issue_peek_pc;
+            id_ex_instr       <= rs_sh_issue_peek_instr;
+            id_ex_imm         <= rs_sh_issue_peek_imm;
+            id_ex_rs1_addr    <= 5'b0;
+            id_ex_rs2_addr    <= 5'b0;
+            id_ex_rd          <= rs_sh_issue_peek_rd_arch;
+            id_ex_alu_op      <= rs_sh_issue_peek_alu_op;
+            id_ex_a_src       <= rs_sh_issue_peek_a_src;
+            id_ex_b_src       <= rs_sh_issue_peek_b_src;
+            id_ex_br_type     <= `BR_NONE;
+            id_ex_is_jump     <= 1'b0;
+            id_ex_mem_read    <= 1'b0;
+            id_ex_mem_write   <= 1'b0;
+            id_ex_mem_funct3  <= 3'b0;
+            id_ex_reg_write   <= 1'b1;
+            id_ex_wb_sel      <= rs_sh_issue_peek_wb_sel;
+            id_ex_valid       <= 1'b1;
+            id_ex_is_ecall    <= 1'b0;
+            id_ex_is_mret     <= 1'b0;
+            id_ex_is_illegal  <= 1'b0;
+            id_ex_pred_taken  <= 1'b0;
+            id_ex_pred_target <= 32'b0;
+            id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
+            id_ex_rob_tag     <= rs_sh_issue_peek_rob_tag;
+            id_ex_rd_ptag     <= rs_sh_issue_peek_rd_ptag;
+            id_ex_rs1_ptag    <= 6'b0;
+            id_ex_rs2_ptag    <= 6'b0;
         end else begin
             id_ex_pc          <= id1_id2_pc0;
             id_ex_instr       <= id_instr;
@@ -1406,6 +1455,7 @@ module cpu_top (
     // in-flight?". ptag==0 (x0) is always ready.
     wire rs_sh_alloc_rs1_rdy = (rn_s0_rs1_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs1_ptag];
     wire rs_sh_alloc_rs2_rdy = (rn_s0_rs2_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs2_ptag];
+    assign rs_take_ex1 = rs_sh_issue_peek_v && rs_sh_alu_op && !id1_id2_valid1;
 
     wire [31:0] rs_sh_alloc_count, rs_sh_issue_count, rs_sh_full_stall_count;
     wire [31:0] rs_sh_wait_cycles_total, rs_sh_ready_at_alloc_count;
@@ -1417,18 +1467,11 @@ module cpu_top (
     assign prf_ra4 = rn_s0_rs1_ptag;
     assign prf_ra5 = rn_s0_rs2_ptag;
 
-    // T2b-step1: shadow-RS issue port wires (registered inside rs_shadow)
-    wire        rs_sh_issue_v;
-    wire [31:0] rs_sh_issue_rs1_val, rs_sh_issue_rs2_val;
-    wire [3:0]  rs_sh_issue_alu_op;
-    wire [5:0]  rs_sh_issue_rd_ptag;
-    wire [3:0]  rs_sh_issue_rob_tag;
-    wire [31:0] rs_sh_issue_pc;
-
     rs_shadow #(.DEPTH(4), .PTAG_W(6), .ROB_W(4)) u_rs_shadow (
         .clk                  (clk),
         .rst_n                (rst_n),
         .flush                (ex_redirect),
+        .issue_grant          (rs_take_ex1),
         .alloc_valid          (rs_sh_alu_op),
         .alloc_rs1_ptag       (rn_s0_rs1_ptag),
         .alloc_rs2_ptag       (rn_s0_rs2_ptag),
@@ -1439,6 +1482,12 @@ module cpu_top (
         .alloc_rs1_val        (prf_r4),
         .alloc_rs2_val        (prf_r5),
         .alloc_alu_op         (id_alu_op),
+        .alloc_imm            (id_imm),
+        .alloc_a_src          (id_a_src),
+        .alloc_b_src          (id_b_src),
+        .alloc_wb_sel         (id_wb_sel),
+        .alloc_rd_arch        (id_rd),
+        .alloc_instr          (id_instr),
         .alloc_pc             (id1_id2_pc0),
         .cdb0_valid           (cdb0_valid),
         .cdb0_ptag            (cdb0_ptag),
@@ -1453,6 +1502,19 @@ module cpu_top (
         .issue_rd_ptag_o      (rs_sh_issue_rd_ptag),
         .issue_rob_tag_o      (rs_sh_issue_rob_tag),
         .issue_pc_o           (rs_sh_issue_pc),
+        .issue_peek_v_o       (rs_sh_issue_peek_v),
+        .issue_peek_rs1_val_o (rs_sh_issue_peek_rs1_val),
+        .issue_peek_rs2_val_o (rs_sh_issue_peek_rs2_val),
+        .issue_peek_alu_op_o  (rs_sh_issue_peek_alu_op),
+        .issue_peek_imm_o     (rs_sh_issue_peek_imm),
+        .issue_peek_a_src_o   (rs_sh_issue_peek_a_src),
+        .issue_peek_b_src_o   (rs_sh_issue_peek_b_src),
+        .issue_peek_wb_sel_o  (rs_sh_issue_peek_wb_sel),
+        .issue_peek_rd_arch_o (rs_sh_issue_peek_rd_arch),
+        .issue_peek_instr_o   (rs_sh_issue_peek_instr),
+        .issue_peek_rd_ptag_o (rs_sh_issue_peek_rd_ptag),
+        .issue_peek_rob_tag_o (rs_sh_issue_peek_rob_tag),
+        .issue_peek_pc_o      (rs_sh_issue_peek_pc),
         .alloc_count          (rs_sh_alloc_count),
         .issue_count          (rs_sh_issue_count),
         .full_stall_count     (rs_sh_full_stall_count),

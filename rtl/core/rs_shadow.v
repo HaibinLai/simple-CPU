@@ -37,6 +37,7 @@ module rs_shadow #(
     input  wire                  clk,
     input  wire                  rst_n,
     input  wire                  flush,
+    input  wire                  issue_grant,
 
     // Dispatch event (from cpu_top: slot0 ALU op being pushed into ID/EX)
     input  wire                  alloc_valid,
@@ -51,6 +52,12 @@ module rs_shadow #(
     input  wire [31:0]           alloc_rs1_val,
     input  wire [31:0]           alloc_rs2_val,
     input  wire [3:0]            alloc_alu_op,
+    input  wire [31:0]           alloc_imm,
+    input  wire                  alloc_a_src,
+    input  wire                  alloc_b_src,
+    input  wire [1:0]            alloc_wb_sel,
+    input  wire [4:0]            alloc_rd_arch,
+    input  wire [31:0]           alloc_instr,
     input  wire [31:0]           alloc_pc,
 
     // CDB lanes (from cpu_top T1 wires)
@@ -70,6 +77,19 @@ module rs_shadow #(
     output reg  [PTAG_W-1:0]     issue_rd_ptag_o,
     output reg  [ROB_W-1:0]      issue_rob_tag_o,
     output reg  [31:0]           issue_pc_o,
+    output wire                  issue_peek_v_o,
+    output wire [31:0]           issue_peek_rs1_val_o,
+    output wire [31:0]           issue_peek_rs2_val_o,
+    output wire [3:0]            issue_peek_alu_op_o,
+    output wire [31:0]           issue_peek_imm_o,
+    output wire                  issue_peek_a_src_o,
+    output wire                  issue_peek_b_src_o,
+    output wire [1:0]            issue_peek_wb_sel_o,
+    output wire [4:0]            issue_peek_rd_arch_o,
+    output wire [31:0]           issue_peek_instr_o,
+    output wire [PTAG_W-1:0]     issue_peek_rd_ptag_o,
+    output wire [ROB_W-1:0]      issue_peek_rob_tag_o,
+    output wire [31:0]           issue_peek_pc_o,
 
     // Observability counters
     output reg  [31:0]           alloc_count,
@@ -93,6 +113,12 @@ module rs_shadow #(
     reg [31:0]           rs1_val [0:DEPTH-1];
     reg [31:0]           rs2_val [0:DEPTH-1];
     reg [3:0]            alu_op  [0:DEPTH-1];
+    reg [31:0]           imm_e   [0:DEPTH-1];
+    reg                  a_src_e [0:DEPTH-1];
+    reg                  b_src_e [0:DEPTH-1];
+    reg [1:0]            wb_sel_e[0:DEPTH-1];
+    reg [4:0]            rd_arch [0:DEPTH-1];
+    reg [31:0]           instr_e [0:DEPTH-1];
     reg [31:0]           pc_e    [0:DEPTH-1];
 
     // ---- combinational helpers ----
@@ -139,6 +165,29 @@ module rs_shadow #(
         end
     end
 
+    wire [31:0] issue_rs1_val_now = wake_rs1[issue_idx] ?
+                                    ((cdb0_valid && (cdb0_ptag == rs1[issue_idx])) ?
+                                     cdb0_value : cdb1_value) :
+                                    rs1_val[issue_idx];
+    wire [31:0] issue_rs2_val_now = wake_rs2[issue_idx] ?
+                                    ((cdb0_valid && (cdb0_ptag == rs2[issue_idx])) ?
+                                     cdb0_value : cdb1_value) :
+                                    rs2_val[issue_idx];
+
+    assign issue_peek_v_o       = issue_v;
+    assign issue_peek_rs1_val_o = issue_rs1_val_now;
+    assign issue_peek_rs2_val_o = issue_rs2_val_now;
+    assign issue_peek_alu_op_o  = alu_op[issue_idx];
+    assign issue_peek_imm_o     = imm_e[issue_idx];
+    assign issue_peek_a_src_o   = a_src_e[issue_idx];
+    assign issue_peek_b_src_o   = b_src_e[issue_idx];
+    assign issue_peek_wb_sel_o  = wb_sel_e[issue_idx];
+    assign issue_peek_rd_arch_o = rd_arch[issue_idx];
+    assign issue_peek_instr_o   = instr_e[issue_idx];
+    assign issue_peek_rd_ptag_o = rd[issue_idx];
+    assign issue_peek_rob_tag_o = rob[issue_idx];
+    assign issue_peek_pc_o      = pc_e[issue_idx];
+
     // free slot for alloc (lowest-index empty)
     reg                  free_v;
     reg [$clog2(DEPTH):0] free_idx;
@@ -156,8 +205,7 @@ module rs_shadow #(
     // accept alloc only if there is room (after this cycle's issue clears one)
     // Simplification: model RS as updated-after-issue, so an issue this cycle
     // frees a slot for the same-cycle alloc.
-    wire alloc_will_have_slot = free_v ||
-                                (issue_v && (issue_idx != free_idx));
+    wire alloc_will_have_slot = free_v || (issue_grant && issue_v);
     // (The above is approximate; for DEPTH small the dominant case is issue
     // frees a slot if no slot was already free.)
     wire alloc_take = alloc_valid && alloc_will_have_slot;
@@ -187,6 +235,12 @@ module rs_shadow #(
                 rs1_val[w] <= 32'b0;
                 rs2_val[w] <= 32'b0;
                 alu_op[w]  <= 4'b0;
+                imm_e[w]   <= 32'b0;
+                a_src_e[w] <= 1'b0;
+                b_src_e[w] <= 1'b0;
+                wb_sel_e[w]<= 2'b0;
+                rd_arch[w] <= 5'b0;
+                instr_e[w] <= 32'h00000013;
                 pc_e[w]    <= 32'b0;
             end
             alloc_count          <= 32'b0;
@@ -234,7 +288,7 @@ module rs_shadow #(
 
             // 2) issue (clear valid + register issue port outputs)
             issue_v_o <= 1'b0;   // default deassert
-            if (issue_v) begin
+            if (issue_grant && issue_v) begin
                 v[issue_idx]      <= 1'b0;
                 issue_count       <= issue_count + 32'd1;
                 wait_cycles_total <= wait_cycles_total + age[issue_idx];
@@ -242,14 +296,8 @@ module rs_shadow #(
                 // operand value: if wake_rs* fires this cycle, the new value
                 // is on cdb*_value (rs*_val itself updates after this clk).
                 issue_v_o       <= 1'b1;
-                issue_rs1_val_o <= wake_rs1[issue_idx] ?
-                                   ((cdb0_valid && (cdb0_ptag == rs1[issue_idx])) ?
-                                    cdb0_value : cdb1_value) :
-                                   rs1_val[issue_idx];
-                issue_rs2_val_o <= wake_rs2[issue_idx] ?
-                                   ((cdb0_valid && (cdb0_ptag == rs2[issue_idx])) ?
-                                    cdb0_value : cdb1_value) :
-                                   rs2_val[issue_idx];
+                issue_rs1_val_o <= issue_rs1_val_now;
+                issue_rs2_val_o <= issue_rs2_val_now;
                 issue_alu_op_o  <= alu_op[issue_idx];
                 issue_rd_ptag_o <= rd[issue_idx];
                 issue_rob_tag_o <= rob[issue_idx];
@@ -291,8 +339,14 @@ module rs_shadow #(
                                          (cdb1_valid && cdb1_ptag == alloc_rs2_ptag) ? cdb1_value :
                                          32'b0;
                     alu_op[free_idx]  <= alloc_alu_op;
+                    imm_e[free_idx]   <= alloc_imm;
+                    a_src_e[free_idx] <= alloc_a_src;
+                    b_src_e[free_idx] <= alloc_b_src;
+                    wb_sel_e[free_idx]<= alloc_wb_sel;
+                    rd_arch[free_idx] <= alloc_rd_arch;
+                    instr_e[free_idx] <= alloc_instr;
                     pc_e[free_idx]    <= alloc_pc;
-                end else if (issue_v) begin
+                end else if (issue_grant && issue_v) begin
                     v[issue_idx]      <= 1'b1;
                     rs1[issue_idx]    <= alloc_rs1_ptag;
                     rs2[issue_idx]    <= alloc_rs2_ptag;
@@ -314,6 +368,12 @@ module rs_shadow #(
                                           (cdb1_valid && cdb1_ptag == alloc_rs2_ptag) ? cdb1_value :
                                           32'b0;
                     alu_op[issue_idx]  <= alloc_alu_op;
+                    imm_e[issue_idx]   <= alloc_imm;
+                    a_src_e[issue_idx] <= alloc_a_src;
+                    b_src_e[issue_idx] <= alloc_b_src;
+                    wb_sel_e[issue_idx]<= alloc_wb_sel;
+                    rd_arch[issue_idx] <= alloc_rd_arch;
+                    instr_e[issue_idx] <= alloc_instr;
                     pc_e[issue_idx]    <= alloc_pc;
                 end
                 alloc_count <= alloc_count + 32'd1;
