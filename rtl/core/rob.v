@@ -129,7 +129,8 @@ module rob #(
     input  wire [1:0]           commit_pop_count,
 
     // Diagnostics
-    output wire [AW:0]          count
+    output wire [AW:0]          count,
+    output wire [AW-1:0]        head_tag
 );
 
     // ---- Storage ----
@@ -155,6 +156,7 @@ module rob #(
     reg [AW:0]           cnt;
 
     assign count       = cnt;
+    assign head_tag    = head_ptr;
     assign full        = (cnt == DEPTH);
     assign almost_full = (cnt >= DEPTH - 1);
 

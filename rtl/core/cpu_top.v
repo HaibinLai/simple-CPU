@@ -356,14 +356,18 @@ module cpu_top (
     // OoO Stage1-bis step3: 加入 rn_block_slot0/slot1 闸门。注意 rn_block_*
     // 由 cpu_top 在 "would-be alloc" + rn_free_count 上计算，所以 ifq_pop_*
     // 不会反馈进 rename，避免组合环。
-    wire ifq_pop_req_slot0 = id1_id2_valid0 && !stall && !ex_redirect;
-    wire ifq_pop_slot0  = ifq_pop_req_slot0 && !rn_block_slot0;
+    wire slot0_can_consider = id1_id2_valid0 && !stall && !ex_redirect;
+    wire slot0_is_alu;
+    wire slot0_pop_would;
+    wire slot1_pop_would;
+    wire slot0_pop_allow;
+    wire slot1_pop_allow;
     // R2: 双发射 — 仅当 slot0 pop 且 slot1 满足配对条件时才 pop slot1
     wire id2_issue_slot1;
     wire rs_sh_issue_peek_v;
-    wire rs_take_ex1;
-    wire ifq_pop_req_slot1 = ifq_pop_req_slot0 && id2_issue_slot1 && !rs_take_ex1;
-    wire ifq_pop_slot1  = ifq_pop_req_slot1 && !rn_block_slot0 && !rn_block_slot1;
+    wire rs_issue_allow;
+    wire ifq_pop_slot0 = slot0_pop_allow;
+    wire ifq_pop_slot1 = slot1_pop_allow;
 
     wire [3:0]  ifq_count;
 
@@ -567,6 +571,7 @@ module cpu_top (
     // M3.2: ROB alloc tag forward decl（实例化在文件末尾）
     wire [3:0]  rob_alloc_tag_0;
     wire [3:0]  rob_alloc_tag_1;
+    wire [3:0]  rob_head_tag;
     // M3.4a/b: rename ptag forward decl（实例化在文件末尾）
     wire [5:0]  rn_s0_rs1_ptag, rn_s0_rs2_ptag;
     wire [5:0]  rn_s1_rs1_ptag, rn_s1_rs2_ptag;
@@ -785,7 +790,7 @@ module cpu_top (
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
-        end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1 || rs_take_ex1) begin
+        end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1 || rs_issue_allow) begin
             // 刷新/气泡 slot1
             id1_ex_instr      <= 32'h00000013;
             id1_ex_rd         <= 5'b0;
@@ -865,7 +870,7 @@ module cpu_top (
             id_ex_pred_target <= 32'b0;
             id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
             id_ex_from_rs     <= 1'b0;
-        end else if (rs_take_ex1) begin
+        end else if (rs_issue_allow) begin
             id_ex_pc          <= rs_sh_issue_peek_pc;
             id_ex_instr       <= rs_sh_issue_peek_instr;
             id_ex_imm         <= rs_sh_issue_peek_imm;
@@ -1457,17 +1462,35 @@ module cpu_top (
     // Eligible dispatch into shadow RS = slot0 issuing an ALU op
     //   (not load, not store, not branch, not jump). Limit to ALU so
     //   the comparison vs an ALU-RS is apples-to-apples.
-    wire rs_sh_alu_op = ifq_pop_slot0
-                        && !id_mem_read && !id_mem_write
-                        && (id_br_type == `BR_NONE) && !id_is_jump
-                        && !id_is_ecall && !id_is_mret && !id_is_illegal;
+    assign slot0_is_alu = !id_mem_read && !id_mem_write
+                          && (id_br_type == `BR_NONE) && !id_is_jump
+                          && !id_is_ecall && !id_is_mret && !id_is_illegal;
+    wire rs_sh_alu_op = ifq_pop_slot0 && slot0_is_alu;
 
     // ready-at-alloc test: rename's busy_vec is the post-update busy after
     // commit/wb in the previous cycle, so it reflects "is producer still
     // in-flight?". ptag==0 (x0) is always ready.
     wire rs_sh_alloc_rs1_rdy = (rn_s0_rs1_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs1_ptag];
     wire rs_sh_alloc_rs2_rdy = (rn_s0_rs2_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs2_ptag];
-    assign rs_take_ex1 = rs_sh_issue_peek_v && rs_sh_alu_op && !id1_id2_valid1;
+    // 环形年龄比较（以 ROB head 为基准）：更小 delta 代表更老。
+    // 仅在 slot0 为 ALU 且可被后端考虑时，允许 shadow-RS 抢占 EX1。
+    assign slot0_pop_would = slot0_can_consider;
+    assign slot1_pop_would = slot0_can_consider && id2_issue_slot1;
+
+    wire slot0_pop_prearb = slot0_pop_would && !rn_block_slot0;
+    wire slot1_pop_prearb = slot1_pop_would && !rn_block_slot0 && !rn_block_slot1;
+    wire [3:0] rs_issue_age_delta = rs_sh_issue_peek_rob_tag - rob_head_tag;
+    wire [3:0] slot0_alloc_age_delta = rob_alloc_tag_0 - rob_head_tag;
+    wire rs_issue_older_than_slot0 = (rs_issue_age_delta < slot0_alloc_age_delta);
+    wire rs_issue_age_allow = !slot0_pop_prearb || rs_issue_older_than_slot0;
+    assign rs_issue_allow = rs_sh_issue_peek_v
+                            && slot0_can_consider
+                            && slot0_is_alu
+                            && !slot0_pop_prearb
+                            && rs_issue_age_allow;
+
+    assign slot0_pop_allow = slot0_pop_prearb && !rs_issue_allow;
+    assign slot1_pop_allow = slot1_pop_prearb;
 
     wire [31:0] rs_sh_alloc_count, rs_sh_issue_count, rs_sh_full_stall_count;
     wire [31:0] rs_sh_wait_cycles_total, rs_sh_ready_at_alloc_count;
@@ -1483,7 +1506,7 @@ module cpu_top (
         .clk                  (clk),
         .rst_n                (rst_n),
         .flush                (ex_redirect),
-        .issue_grant          (rs_take_ex1),
+        .issue_grant          (rs_issue_allow),
         .alloc_valid          (rs_sh_alu_op),
         .alloc_rs1_ptag       (rn_s0_rs1_ptag),
         .alloc_rs2_ptag       (rn_s0_rs2_ptag),
@@ -1602,8 +1625,8 @@ module cpu_top (
     // rn_block_slot0/1 在文件顶部 forward-declared
     wire [5:0]  rn_free_count;
 
-    wire        rn_s0_alloc_req = ifq_pop_req_slot0 && id_reg_write && (id_rd != 5'd0);
-    wire        rn_s1_alloc_req = ifq_pop_req_slot1 && id1_reg_write && (id1_rd != 5'd0);
+    wire        rn_s0_alloc_req = slot0_pop_would && id_reg_write && (id_rd != 5'd0);
+    wire        rn_s1_alloc_req = slot1_pop_would && id1_reg_write && (id1_rd != 5'd0);
 
     // OoO Stage1-bis step3: per-slot rename free-list block
     //   slot0 阻塞条件：slot0 需分配但 free_count == 0
@@ -1612,9 +1635,10 @@ module cpu_top (
     assign rn_block_slot0 = rn_s0_alloc_req && (rn_free_count == 6'd0);
     assign rn_block_slot1 = rn_s1_alloc_req && (rn_free_count < (rn_s0_alloc_req ? 6'd2 : 6'd1));
 
-    // 实际传给 rename 的 alloc 信号（被 block 时 = 0，rename 内部 fl_head/map 不动）
-    wire        rn_s0_alloc = rn_s0_alloc_req && !rn_block_slot0;
-    wire        rn_s1_alloc = rn_s1_alloc_req && !rn_block_slot0 && !rn_block_slot1;
+    // 实际传给 rename 的 alloc 信号必须与最终 pop allow 一致，
+    // 避免出现“IFQ 未出队但 rename 已分配”的状态失配。
+    wire        rn_s0_alloc = slot0_pop_allow && id_reg_write && (id_rd != 5'd0);
+    wire        rn_s1_alloc = slot1_pop_allow && id1_reg_write && (id1_rd != 5'd0);
 
     rename u_rename (
         .clk                (clk),
@@ -1769,7 +1793,8 @@ module cpu_top (
         .commit_exception_1 (rob_commit_exc_1),
         .commit_exc_cause_1 (rob_commit_cause_1),
         .commit_pop_count   (rob_pop_cnt),
-        .count              (rob_count)
+        .count              (rob_count),
+        .head_tag           (rob_head_tag)
     );
 
 endmodule
