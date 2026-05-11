@@ -365,7 +365,9 @@ module cpu_top (
     // R2: 双发射 — 仅当 slot0 pop 且 slot1 满足配对条件时才 pop slot1
     wire id2_issue_slot1;
     wire rs_sh_issue_peek_v;
-    wire rs_issue_allow;
+    wire rs_issue_allow;       // T2b-step3a-v1: A-path (RS->id_ex / slot0 EX1)
+    wire rs_issue_via_b;       // T2b-step3a-v1: B-path (RS->id1_ex / slot1 EX1b)
+    wire rs_issue_grant = rs_issue_allow || rs_issue_via_b;
     wire ifq_pop_slot0 = slot0_pop_allow;
     wire ifq_pop_slot1 = slot1_pop_allow;
 
@@ -661,6 +663,11 @@ module cpu_top (
     reg [3:0]  id1_ex_rob_tag;
     reg [5:0]  id1_ex_rd_ptag;
     reg [5:0]  id1_ex_rs1_ptag, id1_ex_rs2_ptag;
+    // T2b-step3a-v1 (Option B): id1_ex can be filled by RS issue when slot1
+    // EX1b pipe is otherwise idle. id1_ex_from_rs marks the entry; rs*_val
+    // hold the captured/woken-up operand values.
+    reg        id1_ex_from_rs;
+    reg [31:0] id1_ex_rs1_val, id1_ex_rs2_val;
 
     // ID/EX 流水线寄存器
     reg [31:0] id_ex_pc;
@@ -790,14 +797,44 @@ module cpu_top (
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
             id1_ex_rs2_ptag   <= 6'b0;
+            id1_ex_from_rs    <= 1'b0;
+            id1_ex_rs1_val    <= 32'b0;
+            id1_ex_rs2_val    <= 32'b0;
         end else if (ex_redirect || stall || rn_block_slot0 || rn_block_slot1 || rs_issue_allow) begin
-            // 刷新/气泡 slot1
+            // 刷新/气泡 slot1（A 路径 RS issue 也 bubble，因为 slot0 让位给 RS，slot1 此 cycle 不能跟随 slot0 进流水线）
             id1_ex_instr      <= 32'h00000013;
             id1_ex_rd         <= 5'b0;
             id1_ex_reg_write  <= 1'b0;
             id1_ex_valid      <= 1'b0;
             id1_ex_br_type    <= `BR_NONE;
             id1_ex_mem_read   <= 1'b0;
+            id1_ex_from_rs    <= 1'b0;
+        end else if (rs_issue_via_b) begin
+            // T2b-step3a-v1 (Option B): RS issues into slot1 EX1b pipe.
+            // Reuses u_alu_slot1, slot1_wb_we, prf_we1, cdb1.
+            id1_ex_pc         <= rs_sh_issue_peek_pc;
+            id1_ex_instr      <= rs_sh_issue_peek_instr;
+            id1_ex_imm        <= rs_sh_issue_peek_imm;
+            id1_ex_rs1_addr   <= 5'b0;
+            id1_ex_rs2_addr   <= 5'b0;
+            id1_ex_rd         <= rs_sh_issue_peek_rd_arch;
+            id1_ex_alu_op     <= rs_sh_issue_peek_alu_op;
+            id1_ex_a_src      <= rs_sh_issue_peek_a_src;
+            id1_ex_b_src      <= rs_sh_issue_peek_b_src;
+            id1_ex_reg_write  <= 1'b1;
+            id1_ex_wb_sel     <= rs_sh_issue_peek_wb_sel;
+            id1_ex_valid      <= 1'b1;
+            id1_ex_imm_type   <= `IMM_NONE;
+            id1_ex_br_type    <= `BR_NONE;
+            id1_ex_mem_read   <= 1'b0;
+            id1_ex_mem_funct3 <= 3'b0;
+            id1_ex_rob_tag    <= rs_sh_issue_peek_rob_tag;
+            id1_ex_rd_ptag    <= rs_sh_issue_peek_rd_ptag;
+            id1_ex_rs1_ptag   <= 6'b0;
+            id1_ex_rs2_ptag   <= 6'b0;
+            id1_ex_from_rs    <= 1'b1;
+            id1_ex_rs1_val    <= rs_sh_issue_peek_rs1_val;
+            id1_ex_rs2_val    <= rs_sh_issue_peek_rs2_val;
         end else begin
             id1_ex_pc         <= id1_id2_pc1;
             id1_ex_instr      <= id1_instr;
@@ -819,6 +856,7 @@ module cpu_top (
             id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
             id1_ex_rs1_ptag   <= rn_s1_rs1_ptag;       // M3.4c: 携带 rs ptag
             id1_ex_rs2_ptag   <= rn_s1_rs2_ptag;
+            id1_ex_from_rs    <= 1'b0;
         end
     end
 
@@ -1021,8 +1059,13 @@ module cpu_top (
         .imm      (slot1_imm)
     );
 
-    wire [31:0] slot1_a = (id1_ex_a_src == `ASRC_PC) ? id1_ex_pc : slot1_rs1_fwd;
-    wire [31:0] slot1_b = (id1_ex_b_src == `BSRC_IMM) ? slot1_imm : slot1_rs2_fwd;
+    wire [31:0] slot1_a = (id1_ex_a_src == `ASRC_PC) ? id1_ex_pc :
+                          (id1_ex_from_rs ? id1_ex_rs1_val : slot1_rs1_fwd);
+    // T2b-step3a-v1: RS-issued entries store imm directly in id1_ex_imm
+    // (imm_type isn't recoverable post-decode, so bypass imm_gen recompute).
+    wire [31:0] slot1_b_imm = id1_ex_from_rs ? id1_ex_imm : slot1_imm;
+    wire [31:0] slot1_b = (id1_ex_b_src == `BSRC_IMM) ? slot1_b_imm :
+                          (id1_ex_from_rs ? id1_ex_rs2_val : slot1_rs2_fwd);
 
     wire [31:0] slot1_alu_y;
     alu u_alu_slot1 (
@@ -1390,7 +1433,16 @@ module cpu_top (
     assign prf_we0 = wb_we && (mem_wb_rd != 5'd0);
     assign prf_wa0 = {1'b0, mem_wb_rd};
     assign prf_wd0 = wb_data;
-    assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0);
+    // T2b-step3a-v1 fix: when slot1 EX1b is firing an RS-issued (out-of-order)
+    // op, suppress the arch-idx PRF write (we1). The arch-idx slot
+    // (PRF[0..31]) is also the "identity OLD ptag" for any reg that hasn't
+    // been renamed yet; an OoO write can clobber an older in-flight reader
+    // still using the identity ptag. We KEEP the ptag-side write (we3 →
+    // PRF[NEW ptag]) and the CDB1 broadcast (ROB done + RS wake up) so
+    // forward progress is unaffected. The matching in-order copy of the
+    // same instr will eventually reach mem_wb and update arch-idx via
+    // prf_we0 in program order.
+    assign prf_we1 = slot1_wb_we && (id1_ex_rd != 5'd0) && !id1_ex_from_rs;
     assign prf_wa1 = {1'b0, id1_ex_rd};
     assign prf_wd1 = slot1_wb_data;
     // 读地址：使用 spec ptag（OoO 准备）。Forwarding 仍按 arch id 命中较新值，
@@ -1404,7 +1456,11 @@ module cpu_top (
     assign prf_we2 = prf_we0 && (mem_wb_rd_ptag != {1'b0, mem_wb_rd});
     assign prf_wa2 = mem_wb_rd_ptag;
     assign prf_wd2 = wb_data;
-    assign prf_we3 = prf_we1 && (id1_ex_rd_ptag != {1'b0, id1_ex_rd});
+    // T2b-step3a-v1 fix: prf_we3 must remain active even when prf_we1 is
+    // suppressed for from_rs (so PRF[NEW ptag] still receives the OoO value
+    // for downstream readers). Recompute the gate from slot1_wb_we directly.
+    assign prf_we3 = slot1_wb_we && (id1_ex_rd != 5'd0) &&
+                     (id1_ex_rd_ptag != {1'b0, id1_ex_rd});
     assign prf_wa3 = id1_ex_rd_ptag;
     assign prf_wd3 = slot1_wb_data;
 
@@ -1489,6 +1545,21 @@ module cpu_top (
                             && !slot0_pop_prearb
                             && rs_issue_age_allow;
 
+    // T2b-step3a-v1 (Option B): RS B-path. When the A-path is unavailable
+    // (e.g. slot0 is non-ALU, or slot0 wants to pop and is older), route the
+    // RS-ready entry into the slot1 EX1b pipe instead. Conditions:
+    //   - RS has a ready entry
+    //   - A-path is not firing
+    //   - slot1 EX1b pipe is idle this cycle (no slot1 IFQ pop)
+    //   - no global stall / redirect
+    //   - rename block on slot1 must not gate it (we don't allocate; we just
+    //     issue an already-renamed entry from RS)
+    assign rs_issue_via_b = rs_sh_issue_peek_v
+                            && !rs_issue_allow
+                            && !ifq_pop_slot1
+                            && !ex_redirect
+                            && !stall;
+
     assign slot0_pop_allow = slot0_pop_prearb && !rs_issue_allow;
     assign slot1_pop_allow = slot1_pop_prearb;
 
@@ -1506,7 +1577,7 @@ module cpu_top (
         .clk                  (clk),
         .rst_n                (rst_n),
         .flush                (ex_redirect),
-        .issue_grant          (rs_issue_allow),
+        .issue_grant          (rs_issue_grant),
         .alloc_valid          (rs_sh_alu_op),
         .alloc_rs1_ptag       (rn_s0_rs1_ptag),
         .alloc_rs2_ptag       (rn_s0_rs2_ptag),

@@ -91,6 +91,33 @@ ALU path)**
 and reuses `u_alu_slot1`. Try it as step3a-v1. If CDB collision logic
 becomes too complex, fall back to Option A.
 
+### step3a-v1 — Option B result  **[DONE]**
+
+Implemented Option B in `cpu_top.v`: RS-ready entry can issue through slot1
+EX1b path when A-path is unavailable and slot1 pop is idle.
+
+Final correctness fixes after initial 462/500 random-regression failures:
+
+1. **RS stale-entry self-invalidation (`rs_shadow.v`)**
+   - Root cause: each slot0 ALU instruction exists in both in-order path and
+     RS. If in-order copy already completed, stale RS entry could still issue
+     later and broadcast with a possibly re-used ROB tag.
+   - Fix: drop RS entry when CDB ptag matches entry `rd` ptag; also skip
+     same-cycle issue candidate if it is being invalidated by CDB.
+
+2. **Suppress from-RS arch-idx PRF write (`cpu_top.v`)**
+   - Root cause: Option B OoO issue writing `prf_we1` into arch index
+     (`PRF[0..31]`) can clobber identity-ptag readers of older in-flight ops.
+   - Fix: gate `prf_we1` with `!id1_ex_from_rs` while keeping `prf_we3`
+     (ptag write) active for RS-issued entries.
+
+Validation after fixes:
+- `make`: PASS
+- `make robust`: PASS
+- `python3 tools/run_benchmarks.py`: 9/9 PASS
+- `python3 tools/run_generated_tests.py --dir tb/programs/micro_pair_split --glob '*.hex' -j 1`: 4/4 PASS
+- `python3 tools/run_generated_tests.py -j 1`: 500/500 PASS
+
 ### step3b — non-ALU dispatch flows through RS *(blocked on step3a-v1)*
 *(unchanged from original plan)*
 
@@ -102,7 +129,7 @@ becomes too complex, fall back to Option A.
 
 ## Acceptance Criteria (overall)
 
-- [ ] All existing tests still pass: `make`, `make robust`, 9/9 bench, 4/4 pair-split micro, 200 hazard micro.
+- [x] All existing tests still pass: `make`, `make robust`, 9/9 bench, 4/4 pair-split micro, generated regression (`-j 1`).
 - [ ] `dual%` ≥ baseline (no regression).
 - [ ] `wait_cycles` reduction visible in the rs_shadow counters.
 - [ ] No new timing/structural assertions in TB (e.g. ROB tag wrap, free-list underflow).

@@ -157,7 +157,13 @@ module rs_shadow #(
         issue_idx = {($clog2(DEPTH)+1){1'b0}};
         issue_age = 32'b0;
         for (i = 0; i < DEPTH; i = i + 1) begin
-            if (entry_ready[i] && (!issue_v || age[i] > issue_age)) begin
+            // T2b-step3a-v1 fix: skip entry whose in-order copy is completing
+            // THIS cycle (CDB ptag matches rd). Issuing such an entry would
+            // produce a duplicate cdb1 broadcast next cycle, after the rob_tag
+            // may have already been committed and re-allocated.
+            if (entry_ready[i] && (!issue_v || age[i] > issue_age) &&
+                !(cdb0_valid && (cdb0_ptag == rd[i])) &&
+                !(cdb1_valid && (cdb1_ptag == rd[i]))) begin
                 issue_v   = 1'b1;
                 issue_idx = i[$clog2(DEPTH):0];
                 issue_age = age[i];
@@ -284,6 +290,19 @@ module rs_shadow #(
                 // age++ on every cycle the entry is valid (saturate at 32'hFFFF_FFFF)
                 if (v[w] && age[w] != 32'hFFFF_FFFF)
                     age[w] <= age[w] + 32'd1;
+                // T2b-step3a-v1 fix: CDB self-invalidation. Every slot0 ALU
+                // dispatch is pushed into BOTH the in-order pipe AND the RS
+                // (rs_sh_alu_op fires on every ifq_pop_slot0 & ALU). The
+                // in-order copy completes via cdb0; if we leave the stale
+                // RS entry around, a later RS issue would re-execute the
+                // instruction. Worse, by the time RS issues, the original
+                // rob_tag has been committed and possibly re-allocated, so
+                // the duplicate CDB write corrupts the newer entry. Drop
+                // any RS entry whose rd ptag matches a current CDB broadcast.
+                if (v[w] &&
+                    ((cdb0_valid && (cdb0_ptag == rd[w])) ||
+                     (cdb1_valid && (cdb1_ptag == rd[w]))))
+                    v[w] <= 1'b0;
             end
 
             // 2) issue (clear valid + register issue port outputs)
