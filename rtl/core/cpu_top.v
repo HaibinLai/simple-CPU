@@ -707,6 +707,8 @@ module cpu_top (
     wire [31:0] rs_sh_issue_peek_imm;
     wire        rs_sh_issue_peek_a_src, rs_sh_issue_peek_b_src;
     wire [1:0]  rs_sh_issue_peek_wb_sel;
+    wire        rs_sh_issue_peek_mem_read;
+    wire [2:0]  rs_sh_issue_peek_mem_funct3;
     wire [4:0]  rs_sh_issue_peek_rd_arch;
     wire [31:0] rs_sh_issue_peek_instr;
     wire [5:0]  rs_sh_issue_peek_rd_ptag;
@@ -826,8 +828,8 @@ module cpu_top (
             id1_ex_valid      <= 1'b1;
             id1_ex_imm_type   <= `IMM_NONE;
             id1_ex_br_type    <= `BR_NONE;
-            id1_ex_mem_read   <= 1'b0;
-            id1_ex_mem_funct3 <= 3'b0;
+            id1_ex_mem_read   <= rs_sh_issue_peek_mem_read;
+            id1_ex_mem_funct3 <= rs_sh_issue_peek_mem_funct3;
             id1_ex_rob_tag    <= rs_sh_issue_peek_rob_tag;
             id1_ex_rd_ptag    <= rs_sh_issue_peek_rd_ptag;
             id1_ex_rs1_ptag   <= 6'b0;
@@ -1515,19 +1517,27 @@ module cpu_top (
     // but indexed bit-select wants the decl already in scope).
     wire [63:0] rn_busy_vec;
 
-    // Eligible dispatch into shadow RS = slot0 issuing an ALU op
-    //   (not load, not store, not branch, not jump). Limit to ALU so
-    //   the comparison vs an ALU-RS is apples-to-apples.
+    // RS-eligible slot0 classes:
+    //   - ALU (existing step3a behavior)
+    //   - LOAD (step3b first slice)
+    // Excludes store/branch/jump/system for now.
     assign slot0_is_alu = !id_mem_read && !id_mem_write
                           && (id_br_type == `BR_NONE) && !id_is_jump
                           && !id_is_ecall && !id_is_mret && !id_is_illegal;
-    wire rs_sh_alu_op = ifq_pop_slot0 && slot0_is_alu;
+    wire slot0_is_load = id_mem_read && !id_mem_write
+                         && (id_br_type == `BR_NONE) && !id_is_jump
+                         && !id_is_ecall && !id_is_mret && !id_is_illegal;
+    wire slot0_is_rs_eligible = slot0_is_alu || slot0_is_load;
+    wire rs_sh_alloc_op = ifq_pop_slot0 && slot0_is_rs_eligible;
 
     // ready-at-alloc test: rename's busy_vec is the post-update busy after
     // commit/wb in the previous cycle, so it reflects "is producer still
     // in-flight?". ptag==0 (x0) is always ready.
     wire rs_sh_alloc_rs1_rdy = (rn_s0_rs1_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs1_ptag];
-    wire rs_sh_alloc_rs2_rdy = (rn_s0_rs2_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs2_ptag];
+    // LOAD address generation only depends on rs1. For step3b-load, force rs2
+    // as ready/x0 to avoid unnecessary waiting on an unused operand.
+    wire rs_sh_alloc_rs2_rdy = slot0_is_load ? 1'b1 :
+                               ((rn_s0_rs2_ptag == 6'd0) || !rn_busy_vec[rn_s0_rs2_ptag]);
     // 环形年龄比较（以 ROB head 为基准）：更小 delta 代表更老。
     // 仅在 slot0 为 ALU 且可被后端考虑时，允许 shadow-RS 抢占 EX1。
     assign slot0_pop_would = slot0_can_consider;
@@ -1540,6 +1550,7 @@ module cpu_top (
     wire rs_issue_older_than_slot0 = (rs_issue_age_delta < slot0_alloc_age_delta);
     wire rs_issue_age_allow = !slot0_pop_prearb || rs_issue_older_than_slot0;
     assign rs_issue_allow = rs_sh_issue_peek_v
+                            && !rs_sh_issue_peek_mem_read
                             && slot0_can_consider
                             && slot0_is_alu
                             && !slot0_pop_prearb
@@ -1578,20 +1589,22 @@ module cpu_top (
         .rst_n                (rst_n),
         .flush                (ex_redirect),
         .issue_grant          (rs_issue_grant),
-        .alloc_valid          (rs_sh_alu_op),
+        .alloc_valid          (rs_sh_alloc_op),
         .alloc_rs1_ptag       (rn_s0_rs1_ptag),
-        .alloc_rs2_ptag       (rn_s0_rs2_ptag),
+        .alloc_rs2_ptag       (slot0_is_load ? 6'd0 : rn_s0_rs2_ptag),
         .alloc_rs1_ready      (rs_sh_alloc_rs1_rdy),
         .alloc_rs2_ready      (rs_sh_alloc_rs2_rdy),
         .alloc_rd_ptag        (rn_s0_rd_ptag_new),
         .alloc_rob_tag        (rob_alloc_tag_0),
         .alloc_rs1_val        (prf_r4),
-        .alloc_rs2_val        (prf_r5),
+        .alloc_rs2_val        (slot0_is_load ? 32'b0 : prf_r5),
         .alloc_alu_op         (id_alu_op),
         .alloc_imm            (id_imm),
         .alloc_a_src          (id_a_src),
         .alloc_b_src          (id_b_src),
         .alloc_wb_sel         (id_wb_sel),
+        .alloc_mem_read       (id_mem_read),
+        .alloc_mem_funct3     (id_mem_funct3),
         .alloc_rd_arch        (id_rd),
         .alloc_instr          (id_instr),
         .alloc_pc             (id1_id2_pc0),
@@ -1616,6 +1629,8 @@ module cpu_top (
         .issue_peek_a_src_o   (rs_sh_issue_peek_a_src),
         .issue_peek_b_src_o   (rs_sh_issue_peek_b_src),
         .issue_peek_wb_sel_o  (rs_sh_issue_peek_wb_sel),
+        .issue_peek_mem_read_o   (rs_sh_issue_peek_mem_read),
+        .issue_peek_mem_funct3_o (rs_sh_issue_peek_mem_funct3),
         .issue_peek_rd_arch_o (rs_sh_issue_peek_rd_arch),
         .issue_peek_instr_o   (rs_sh_issue_peek_instr),
         .issue_peek_rd_ptag_o (rs_sh_issue_peek_rd_ptag),

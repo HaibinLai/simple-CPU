@@ -56,6 +56,8 @@ module rs_shadow #(
     input  wire                  alloc_a_src,
     input  wire                  alloc_b_src,
     input  wire [1:0]            alloc_wb_sel,
+    input  wire                  alloc_mem_read,
+    input  wire [2:0]            alloc_mem_funct3,
     input  wire [4:0]            alloc_rd_arch,
     input  wire [31:0]           alloc_instr,
     input  wire [31:0]           alloc_pc,
@@ -85,6 +87,8 @@ module rs_shadow #(
     output wire                  issue_peek_a_src_o,
     output wire                  issue_peek_b_src_o,
     output wire [1:0]            issue_peek_wb_sel_o,
+    output wire                  issue_peek_mem_read_o,
+    output wire [2:0]            issue_peek_mem_funct3_o,
     output wire [4:0]            issue_peek_rd_arch_o,
     output wire [31:0]           issue_peek_instr_o,
     output wire [PTAG_W-1:0]     issue_peek_rd_ptag_o,
@@ -117,6 +121,8 @@ module rs_shadow #(
     reg                  a_src_e [0:DEPTH-1];
     reg                  b_src_e [0:DEPTH-1];
     reg [1:0]            wb_sel_e[0:DEPTH-1];
+    reg                  mem_read_e[0:DEPTH-1];
+    reg [2:0]            mem_funct3_e[0:DEPTH-1];
     reg [4:0]            rd_arch [0:DEPTH-1];
     reg [31:0]           instr_e [0:DEPTH-1];
     reg [31:0]           pc_e    [0:DEPTH-1];
@@ -188,6 +194,8 @@ module rs_shadow #(
     assign issue_peek_a_src_o   = a_src_e[issue_idx];
     assign issue_peek_b_src_o   = b_src_e[issue_idx];
     assign issue_peek_wb_sel_o  = wb_sel_e[issue_idx];
+    assign issue_peek_mem_read_o   = mem_read_e[issue_idx];
+    assign issue_peek_mem_funct3_o = mem_funct3_e[issue_idx];
     assign issue_peek_rd_arch_o = rd_arch[issue_idx];
     assign issue_peek_instr_o   = instr_e[issue_idx];
     assign issue_peek_rd_ptag_o = rd[issue_idx];
@@ -245,6 +253,8 @@ module rs_shadow #(
                 a_src_e[w] <= 1'b0;
                 b_src_e[w] <= 1'b0;
                 wb_sel_e[w]<= 2'b0;
+                mem_read_e[w] <= 1'b0;
+                mem_funct3_e[w] <= 3'b0;
                 rd_arch[w] <= 5'b0;
                 instr_e[w] <= 32'h00000013;
                 pc_e[w]    <= 32'b0;
@@ -362,6 +372,8 @@ module rs_shadow #(
                     a_src_e[free_idx] <= alloc_a_src;
                     b_src_e[free_idx] <= alloc_b_src;
                     wb_sel_e[free_idx]<= alloc_wb_sel;
+                    mem_read_e[free_idx] <= alloc_mem_read;
+                    mem_funct3_e[free_idx] <= alloc_mem_funct3;
                     rd_arch[free_idx] <= alloc_rd_arch;
                     instr_e[free_idx] <= alloc_instr;
                     pc_e[free_idx]    <= alloc_pc;
@@ -391,6 +403,8 @@ module rs_shadow #(
                     a_src_e[issue_idx] <= alloc_a_src;
                     b_src_e[issue_idx] <= alloc_b_src;
                     wb_sel_e[issue_idx]<= alloc_wb_sel;
+                    mem_read_e[issue_idx] <= alloc_mem_read;
+                    mem_funct3_e[issue_idx] <= alloc_mem_funct3;
                     rd_arch[issue_idx] <= alloc_rd_arch;
                     instr_e[issue_idx] <= alloc_instr;
                     pc_e[issue_idx]    <= alloc_pc;

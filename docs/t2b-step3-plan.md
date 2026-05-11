@@ -118,8 +118,32 @@ Validation after fixes:
 - `python3 tools/run_generated_tests.py --dir tb/programs/micro_pair_split --glob '*.hex' -j 1`: 4/4 PASS
 - `python3 tools/run_generated_tests.py -j 1`: 500/500 PASS
 
-### step3b — non-ALU dispatch flows through RS *(blocked on step3a-v1)*
-*(unchanged from original plan)*
+### step3b — non-ALU dispatch flows through RS
+
+#### step3b-v1 (LOAD-only)  **[DONE]**
+
+First non-ALU slice landed with a conservative scope: **slot0 LOAD** is now
+RS-eligible, while store/branch/jump/system remain in-order.
+
+Design choices:
+- Extend RS payload with `mem_read` + `mem_funct3` fields.
+- Keep A-path (`RS -> id_ex/slot0 EX1`) ALU-only.
+- Allow LOAD to issue via B-path (`RS -> id1_ex/slot1 EX1b`) using slot1 load
+  datapath already present.
+- For LOAD alloc, force RS operand-2 as ready/x0 so address-gen only waits on
+  `rs1` (base register), matching real dependency semantics.
+
+Safety constraints preserved:
+- No store/branch/jump/system enters RS in this slice.
+- Existing step3a-v1 stale-entry invalidation remains active.
+
+Validation:
+- `make`: PASS
+- `make robust`: PASS
+- `python3 tools/run_benchmarks.py`: 9/9 PASS
+- `python3 tools/run_generated_tests.py --dir tb/programs/micro_hazard --glob '*.hex' -j 1`: 6/6 PASS
+- `python3 tools/run_generated_tests.py --dir tb/programs/micro_pair_split --glob '*.hex' -j 1`: 4/4 PASS
+- `python3 tools/run_generated_tests.py -j 1`: 500/500 PASS
 
 ### step3c — RS depth 4 → 8 *(blocked on step3a-v1)*
 *(unchanged from original plan)*
