@@ -1601,7 +1601,7 @@ module cpu_top (
     assign prf_ra4 = rn_s0_rs1_ptag;
     assign prf_ra5 = rn_s0_rs2_ptag;
 
-    rs_shadow #(.DEPTH(4), .PTAG_W(6), .ROB_W(4)) u_rs_shadow (
+    rs_shadow #(.DEPTH(8), .PTAG_W(6), .ROB_W(4)) u_rs_shadow (
         .clk                  (clk),
         .rst_n                (rst_n),
         .flush                (ex_redirect),
