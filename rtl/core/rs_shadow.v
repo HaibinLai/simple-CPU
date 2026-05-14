@@ -60,6 +60,11 @@ module rs_shadow #(
     input  wire                  alloc_mem_read,
     input  wire                  alloc_mem_write,
     input  wire [2:0]            alloc_mem_funct3,
+    input  wire [2:0]            alloc_br_type,
+    input  wire                  alloc_is_jump,
+    input  wire                  alloc_pred_taken,
+    input  wire [31:0]           alloc_pred_target,
+    input  wire [31:0]           alloc_pred_ghr,
     input  wire [4:0]            alloc_rd_arch,
     input  wire [31:0]           alloc_instr,
     input  wire [31:0]           alloc_pc,
@@ -95,6 +100,11 @@ module rs_shadow #(
     output wire                  issue_peek_mem_read_o,
     output wire                  issue_peek_mem_write_o,
     output wire [2:0]            issue_peek_mem_funct3_o,
+    output wire [2:0]            issue_peek_br_type_o,
+    output wire                  issue_peek_is_jump_o,
+    output wire                  issue_peek_pred_taken_o,
+    output wire [31:0]           issue_peek_pred_target_o,
+    output wire [31:0]           issue_peek_pred_ghr_o,
     output wire [4:0]            issue_peek_rd_arch_o,
     output wire [31:0]           issue_peek_instr_o,
     output wire [PTAG_W-1:0]     issue_peek_rd_ptag_o,
@@ -131,6 +141,11 @@ module rs_shadow #(
     reg                  mem_read_e[0:DEPTH-1];
     reg                  mem_write_e[0:DEPTH-1];
     reg [2:0]            mem_funct3_e[0:DEPTH-1];
+    reg [2:0]            br_type_e[0:DEPTH-1];
+    reg                  is_jump_e[0:DEPTH-1];
+    reg                  pred_taken_e[0:DEPTH-1];
+    reg [31:0]           pred_target_e[0:DEPTH-1];
+    reg [31:0]           pred_ghr_e[0:DEPTH-1];
     reg [4:0]            rd_arch [0:DEPTH-1];
     reg [31:0]           instr_e [0:DEPTH-1];
     reg [31:0]           pc_e    [0:DEPTH-1];
@@ -207,6 +222,11 @@ module rs_shadow #(
     assign issue_peek_mem_read_o   = mem_read_e[issue_idx];
     assign issue_peek_mem_write_o  = mem_write_e[issue_idx];
     assign issue_peek_mem_funct3_o = mem_funct3_e[issue_idx];
+    assign issue_peek_br_type_o    = br_type_e[issue_idx];
+    assign issue_peek_is_jump_o    = is_jump_e[issue_idx];
+    assign issue_peek_pred_taken_o = pred_taken_e[issue_idx];
+    assign issue_peek_pred_target_o= pred_target_e[issue_idx];
+    assign issue_peek_pred_ghr_o   = pred_ghr_e[issue_idx];
     assign issue_peek_rd_arch_o = rd_arch[issue_idx];
     assign issue_peek_instr_o   = instr_e[issue_idx];
     assign issue_peek_rd_ptag_o = rd[issue_idx];
@@ -268,6 +288,11 @@ module rs_shadow #(
                 mem_read_e[w] <= 1'b0;
                 mem_write_e[w] <= 1'b0;
                 mem_funct3_e[w] <= 3'b0;
+                br_type_e[w] <= 3'b0;
+                is_jump_e[w] <= 1'b0;
+                pred_taken_e[w] <= 1'b0;
+                pred_target_e[w] <= 32'b0;
+                pred_ghr_e[w] <= 32'b0;
                 rd_arch[w] <= 5'b0;
                 instr_e[w] <= 32'h00000013;
                 pc_e[w]    <= 32'b0;
@@ -390,6 +415,11 @@ module rs_shadow #(
                     mem_read_e[free_idx] <= alloc_mem_read;
                     mem_write_e[free_idx] <= alloc_mem_write;
                     mem_funct3_e[free_idx] <= alloc_mem_funct3;
+                    br_type_e[free_idx] <= alloc_br_type;
+                    is_jump_e[free_idx] <= alloc_is_jump;
+                    pred_taken_e[free_idx] <= alloc_pred_taken;
+                    pred_target_e[free_idx] <= alloc_pred_target;
+                    pred_ghr_e[free_idx] <= alloc_pred_ghr;
                     rd_arch[free_idx] <= alloc_rd_arch;
                     instr_e[free_idx] <= alloc_instr;
                     pc_e[free_idx]    <= alloc_pc;
@@ -423,6 +453,11 @@ module rs_shadow #(
                     mem_read_e[issue_idx] <= alloc_mem_read;
                     mem_write_e[issue_idx] <= alloc_mem_write;
                     mem_funct3_e[issue_idx] <= alloc_mem_funct3;
+                    br_type_e[issue_idx] <= alloc_br_type;
+                    is_jump_e[issue_idx] <= alloc_is_jump;
+                    pred_taken_e[issue_idx] <= alloc_pred_taken;
+                    pred_target_e[issue_idx] <= alloc_pred_target;
+                    pred_ghr_e[issue_idx] <= alloc_pred_ghr;
                     rd_arch[issue_idx] <= alloc_rd_arch;
                     instr_e[issue_idx] <= alloc_instr;
                     pc_e[issue_idx]    <= alloc_pc;

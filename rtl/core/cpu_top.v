@@ -711,6 +711,11 @@ module cpu_top (
     wire [2:0]  rs_sh_issue_peek_mem_funct3;
     wire        rs_sh_issue_peek_mem_write;
     wire        rs_sh_issue_peek_reg_write;
+    wire [2:0]  rs_sh_issue_peek_br_type;
+    wire        rs_sh_issue_peek_is_jump;
+    wire        rs_sh_issue_peek_pred_taken;
+    wire [31:0] rs_sh_issue_peek_pred_target;
+    wire [31:0] rs_sh_issue_peek_pred_ghr;
     wire [4:0]  rs_sh_issue_peek_rd_arch;
     wire [31:0] rs_sh_issue_peek_instr;
     wire [5:0]  rs_sh_issue_peek_rd_ptag;
@@ -922,8 +927,8 @@ module cpu_top (
             id_ex_alu_op      <= rs_sh_issue_peek_alu_op;
             id_ex_a_src       <= rs_sh_issue_peek_a_src;
             id_ex_b_src       <= rs_sh_issue_peek_b_src;
-            id_ex_br_type     <= `BR_NONE;
-            id_ex_is_jump     <= 1'b0;
+            id_ex_br_type     <= rs_sh_issue_peek_br_type;
+            id_ex_is_jump     <= rs_sh_issue_peek_is_jump;
             id_ex_mem_read    <= rs_sh_issue_peek_mem_read;
             id_ex_mem_write   <= rs_sh_issue_peek_mem_write;
             id_ex_mem_funct3  <= rs_sh_issue_peek_mem_funct3;
@@ -933,9 +938,9 @@ module cpu_top (
             id_ex_is_ecall    <= 1'b0;
             id_ex_is_mret     <= 1'b0;
             id_ex_is_illegal  <= 1'b0;
-            id_ex_pred_taken  <= 1'b0;
-            id_ex_pred_target <= 32'b0;
-            id_ex_pred_ghr    <= {BPU_GHR_W{1'b0}};
+            id_ex_pred_taken  <= rs_sh_issue_peek_pred_taken;
+            id_ex_pred_target <= rs_sh_issue_peek_pred_target;
+            id_ex_pred_ghr    <= rs_sh_issue_peek_pred_ghr;
             id_ex_rob_tag     <= rs_sh_issue_peek_rob_tag;
             id_ex_rd_ptag     <= rs_sh_issue_peek_rd_ptag;
             id_ex_rs1_ptag    <= 6'b0;
@@ -1521,8 +1526,9 @@ module cpu_top (
 
     // RS-eligible slot0 classes:
     //   - ALU (existing step3a behavior)
-    //   - LOAD (step3b first slice)
-    // Excludes store/branch/jump/system for now.
+    //   - LOAD / STORE (step3b v1-v2)
+    //   - BRANCH / JUMP (step3b v3)
+    // Excludes system (ecall/mret/illegal) only.
     assign slot0_is_alu = !id_mem_read && !id_mem_write
                           && (id_br_type == `BR_NONE) && !id_is_jump
                           && !id_is_ecall && !id_is_mret && !id_is_illegal;
@@ -1532,7 +1538,10 @@ module cpu_top (
     wire slot0_is_store = !id_mem_read && id_mem_write
                           && (id_br_type == `BR_NONE) && !id_is_jump
                           && !id_is_ecall && !id_is_mret && !id_is_illegal;
-    wire slot0_is_rs_eligible = slot0_is_alu || slot0_is_load || slot0_is_store;
+    wire slot0_is_branch_or_jump = ((id_br_type != `BR_NONE) || id_is_jump)
+                                   && !id_is_ecall && !id_is_mret && !id_is_illegal;
+    wire slot0_is_rs_eligible = slot0_is_alu || slot0_is_load || slot0_is_store
+                                || slot0_is_branch_or_jump;
     wire rs_sh_alloc_op = ifq_pop_slot0 && slot0_is_rs_eligible;
 
     // ready-at-alloc test: rename's busy_vec is the post-update busy after
@@ -1573,6 +1582,8 @@ module cpu_top (
                             && !rs_issue_allow
                             && rs_sh_issue_peek_reg_write
                             && !rs_sh_issue_peek_mem_write
+                            && (rs_sh_issue_peek_br_type == `BR_NONE)
+                            && !rs_sh_issue_peek_is_jump
                             && !ifq_pop_slot1
                             && !ex_redirect
                             && !stall;
@@ -1613,6 +1624,11 @@ module cpu_top (
         .alloc_mem_read       (id_mem_read),
         .alloc_mem_write      (id_mem_write),
         .alloc_mem_funct3     (id_mem_funct3),
+        .alloc_br_type        (id_br_type),
+        .alloc_is_jump        (id_is_jump),
+        .alloc_pred_taken     (id1_id2_pred_taken),
+        .alloc_pred_target    (id1_id2_pred_target),
+        .alloc_pred_ghr       (id1_id2_pred_ghr),
         .alloc_rd_arch        (id_rd),
         .alloc_instr          (id_instr),
         .alloc_pc             (id1_id2_pc0),
@@ -1642,6 +1658,11 @@ module cpu_top (
         .issue_peek_mem_read_o   (rs_sh_issue_peek_mem_read),
         .issue_peek_mem_write_o  (rs_sh_issue_peek_mem_write),
         .issue_peek_mem_funct3_o (rs_sh_issue_peek_mem_funct3),
+        .issue_peek_br_type_o    (rs_sh_issue_peek_br_type),
+        .issue_peek_is_jump_o    (rs_sh_issue_peek_is_jump),
+        .issue_peek_pred_taken_o (rs_sh_issue_peek_pred_taken),
+        .issue_peek_pred_target_o(rs_sh_issue_peek_pred_target),
+        .issue_peek_pred_ghr_o   (rs_sh_issue_peek_pred_ghr),
         .issue_peek_reg_write_o  (rs_sh_issue_peek_reg_write),
         .issue_peek_rd_arch_o (rs_sh_issue_peek_rd_arch),
         .issue_peek_instr_o   (rs_sh_issue_peek_instr),
