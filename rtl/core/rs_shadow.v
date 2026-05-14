@@ -56,7 +56,9 @@ module rs_shadow #(
     input  wire                  alloc_a_src,
     input  wire                  alloc_b_src,
     input  wire [1:0]            alloc_wb_sel,
+    input  wire                  alloc_reg_write,
     input  wire                  alloc_mem_read,
+    input  wire                  alloc_mem_write,
     input  wire [2:0]            alloc_mem_funct3,
     input  wire [4:0]            alloc_rd_arch,
     input  wire [31:0]           alloc_instr,
@@ -69,6 +71,8 @@ module rs_shadow #(
     input  wire                  cdb1_valid,
     input  wire [PTAG_W-1:0]     cdb1_ptag,
     input  wire [31:0]           cdb1_value,
+    input  wire                  wb_rob_valid,
+    input  wire [ROB_W-1:0]      wb_rob_tag,
 
     // T2b-step1: registered issue port (NOT yet driving EX1; observability +
     // shadow-ALU cross-check). One issue per cycle.
@@ -87,7 +91,9 @@ module rs_shadow #(
     output wire                  issue_peek_a_src_o,
     output wire                  issue_peek_b_src_o,
     output wire [1:0]            issue_peek_wb_sel_o,
+    output wire                  issue_peek_reg_write_o,
     output wire                  issue_peek_mem_read_o,
+    output wire                  issue_peek_mem_write_o,
     output wire [2:0]            issue_peek_mem_funct3_o,
     output wire [4:0]            issue_peek_rd_arch_o,
     output wire [31:0]           issue_peek_instr_o,
@@ -121,7 +127,9 @@ module rs_shadow #(
     reg                  a_src_e [0:DEPTH-1];
     reg                  b_src_e [0:DEPTH-1];
     reg [1:0]            wb_sel_e[0:DEPTH-1];
+    reg                  reg_write_e[0:DEPTH-1];
     reg                  mem_read_e[0:DEPTH-1];
+    reg                  mem_write_e[0:DEPTH-1];
     reg [2:0]            mem_funct3_e[0:DEPTH-1];
     reg [4:0]            rd_arch [0:DEPTH-1];
     reg [31:0]           instr_e [0:DEPTH-1];
@@ -168,8 +176,9 @@ module rs_shadow #(
             // produce a duplicate cdb1 broadcast next cycle, after the rob_tag
             // may have already been committed and re-allocated.
             if (entry_ready[i] && (!issue_v || age[i] > issue_age) &&
-                !(cdb0_valid && (cdb0_ptag == rd[i])) &&
-                !(cdb1_valid && (cdb1_ptag == rd[i]))) begin
+                !(reg_write_e[i] && cdb0_valid && (cdb0_ptag == rd[i])) &&
+                !(reg_write_e[i] && cdb1_valid && (cdb1_ptag == rd[i])) &&
+                !(wb_rob_valid && (wb_rob_tag == rob[i]))) begin
                 issue_v   = 1'b1;
                 issue_idx = i[$clog2(DEPTH):0];
                 issue_age = age[i];
@@ -194,7 +203,9 @@ module rs_shadow #(
     assign issue_peek_a_src_o   = a_src_e[issue_idx];
     assign issue_peek_b_src_o   = b_src_e[issue_idx];
     assign issue_peek_wb_sel_o  = wb_sel_e[issue_idx];
+    assign issue_peek_reg_write_o  = reg_write_e[issue_idx];
     assign issue_peek_mem_read_o   = mem_read_e[issue_idx];
+    assign issue_peek_mem_write_o  = mem_write_e[issue_idx];
     assign issue_peek_mem_funct3_o = mem_funct3_e[issue_idx];
     assign issue_peek_rd_arch_o = rd_arch[issue_idx];
     assign issue_peek_instr_o   = instr_e[issue_idx];
@@ -253,7 +264,9 @@ module rs_shadow #(
                 a_src_e[w] <= 1'b0;
                 b_src_e[w] <= 1'b0;
                 wb_sel_e[w]<= 2'b0;
+                reg_write_e[w] <= 1'b0;
                 mem_read_e[w] <= 1'b0;
+                mem_write_e[w] <= 1'b0;
                 mem_funct3_e[w] <= 3'b0;
                 rd_arch[w] <= 5'b0;
                 instr_e[w] <= 32'h00000013;
@@ -310,8 +323,9 @@ module rs_shadow #(
                 // the duplicate CDB write corrupts the newer entry. Drop
                 // any RS entry whose rd ptag matches a current CDB broadcast.
                 if (v[w] &&
-                    ((cdb0_valid && (cdb0_ptag == rd[w])) ||
-                     (cdb1_valid && (cdb1_ptag == rd[w]))))
+                    (((reg_write_e[w] && cdb0_valid && (cdb0_ptag == rd[w])) ||
+                      (reg_write_e[w] && cdb1_valid && (cdb1_ptag == rd[w]))) ||
+                     (wb_rob_valid && (wb_rob_tag == rob[w]))))
                     v[w] <= 1'b0;
             end
 
@@ -372,7 +386,9 @@ module rs_shadow #(
                     a_src_e[free_idx] <= alloc_a_src;
                     b_src_e[free_idx] <= alloc_b_src;
                     wb_sel_e[free_idx]<= alloc_wb_sel;
+                    reg_write_e[free_idx] <= alloc_reg_write;
                     mem_read_e[free_idx] <= alloc_mem_read;
+                    mem_write_e[free_idx] <= alloc_mem_write;
                     mem_funct3_e[free_idx] <= alloc_mem_funct3;
                     rd_arch[free_idx] <= alloc_rd_arch;
                     instr_e[free_idx] <= alloc_instr;
@@ -403,7 +419,9 @@ module rs_shadow #(
                     a_src_e[issue_idx] <= alloc_a_src;
                     b_src_e[issue_idx] <= alloc_b_src;
                     wb_sel_e[issue_idx]<= alloc_wb_sel;
+                    reg_write_e[issue_idx] <= alloc_reg_write;
                     mem_read_e[issue_idx] <= alloc_mem_read;
+                    mem_write_e[issue_idx] <= alloc_mem_write;
                     mem_funct3_e[issue_idx] <= alloc_mem_funct3;
                     rd_arch[issue_idx] <= alloc_rd_arch;
                     instr_e[issue_idx] <= alloc_instr;

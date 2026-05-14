@@ -145,6 +145,27 @@ Validation:
 - `python3 tools/run_generated_tests.py --dir tb/programs/micro_pair_split --glob '*.hex' -j 1`: 4/4 PASS
 - `python3 tools/run_generated_tests.py -j 1`: 500/500 PASS
 
+#### step3b-v2 (STORE-through-RS)  **[DONE]**
+
+Extended RS eligibility to include **slot0 STORE** with conservative execution
+rules to preserve correctness:
+
+- RS payload now carries `reg_write` + `mem_write` control bits.
+- STORE and other non-reg-write entries are kept off B-path; B-path remains
+  register-write-focused (ALU/LOAD) to avoid slot1 side effects.
+- Added ROB-tag based RS self-invalidation (`wb_rob_tag`) so entries that do
+  not produce CDB writes (for example STORE) are still retired from RS when
+  their in-order twin has completed WB/commit window, preventing stale reissue
+  after ROB tag reuse.
+
+Validation (same gate as v1):
+- `make`: PASS
+- `make robust`: PASS
+- `python3 tools/run_benchmarks.py`: 9/9 PASS
+- `python3 tools/run_generated_tests.py --dir tb/programs/micro_hazard --glob '*.hex' -j 1`: 6/6 PASS
+- `python3 tools/run_generated_tests.py --dir tb/programs/micro_pair_split --glob '*.hex' -j 1`: 4/4 PASS
+- `python3 tools/run_generated_tests.py -j 1`: 500/500 PASS
+
 ### step3c — RS depth 4 → 8 *(blocked on step3a-v1)*
 *(unchanged from original plan)*
 

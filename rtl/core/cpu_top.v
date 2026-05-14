@@ -709,6 +709,8 @@ module cpu_top (
     wire [1:0]  rs_sh_issue_peek_wb_sel;
     wire        rs_sh_issue_peek_mem_read;
     wire [2:0]  rs_sh_issue_peek_mem_funct3;
+    wire        rs_sh_issue_peek_mem_write;
+    wire        rs_sh_issue_peek_reg_write;
     wire [4:0]  rs_sh_issue_peek_rd_arch;
     wire [31:0] rs_sh_issue_peek_instr;
     wire [5:0]  rs_sh_issue_peek_rd_ptag;
@@ -823,7 +825,7 @@ module cpu_top (
             id1_ex_alu_op     <= rs_sh_issue_peek_alu_op;
             id1_ex_a_src      <= rs_sh_issue_peek_a_src;
             id1_ex_b_src      <= rs_sh_issue_peek_b_src;
-            id1_ex_reg_write  <= 1'b1;
+            id1_ex_reg_write  <= rs_sh_issue_peek_reg_write;
             id1_ex_wb_sel     <= rs_sh_issue_peek_wb_sel;
             id1_ex_valid      <= 1'b1;
             id1_ex_imm_type   <= `IMM_NONE;
@@ -922,10 +924,10 @@ module cpu_top (
             id_ex_b_src       <= rs_sh_issue_peek_b_src;
             id_ex_br_type     <= `BR_NONE;
             id_ex_is_jump     <= 1'b0;
-            id_ex_mem_read    <= 1'b0;
-            id_ex_mem_write   <= 1'b0;
-            id_ex_mem_funct3  <= 3'b0;
-            id_ex_reg_write   <= 1'b1;
+            id_ex_mem_read    <= rs_sh_issue_peek_mem_read;
+            id_ex_mem_write   <= rs_sh_issue_peek_mem_write;
+            id_ex_mem_funct3  <= rs_sh_issue_peek_mem_funct3;
+            id_ex_reg_write   <= rs_sh_issue_peek_reg_write;
             id_ex_wb_sel      <= rs_sh_issue_peek_wb_sel;
             id_ex_valid       <= 1'b1;
             id_ex_is_ecall    <= 1'b0;
@@ -1527,7 +1529,10 @@ module cpu_top (
     wire slot0_is_load = id_mem_read && !id_mem_write
                          && (id_br_type == `BR_NONE) && !id_is_jump
                          && !id_is_ecall && !id_is_mret && !id_is_illegal;
-    wire slot0_is_rs_eligible = slot0_is_alu || slot0_is_load;
+    wire slot0_is_store = !id_mem_read && id_mem_write
+                          && (id_br_type == `BR_NONE) && !id_is_jump
+                          && !id_is_ecall && !id_is_mret && !id_is_illegal;
+    wire slot0_is_rs_eligible = slot0_is_alu || slot0_is_load || slot0_is_store;
     wire rs_sh_alloc_op = ifq_pop_slot0 && slot0_is_rs_eligible;
 
     // ready-at-alloc test: rename's busy_vec is the post-update busy after
@@ -1552,7 +1557,6 @@ module cpu_top (
     assign rs_issue_allow = rs_sh_issue_peek_v
                             && !rs_sh_issue_peek_mem_read
                             && slot0_can_consider
-                            && slot0_is_alu
                             && !slot0_pop_prearb
                             && rs_issue_age_allow;
 
@@ -1567,6 +1571,8 @@ module cpu_top (
     //     issue an already-renamed entry from RS)
     assign rs_issue_via_b = rs_sh_issue_peek_v
                             && !rs_issue_allow
+                            && rs_sh_issue_peek_reg_write
+                            && !rs_sh_issue_peek_mem_write
                             && !ifq_pop_slot1
                             && !ex_redirect
                             && !stall;
@@ -1603,7 +1609,9 @@ module cpu_top (
         .alloc_a_src          (id_a_src),
         .alloc_b_src          (id_b_src),
         .alloc_wb_sel         (id_wb_sel),
+        .alloc_reg_write      (id_reg_write),
         .alloc_mem_read       (id_mem_read),
+        .alloc_mem_write      (id_mem_write),
         .alloc_mem_funct3     (id_mem_funct3),
         .alloc_rd_arch        (id_rd),
         .alloc_instr          (id_instr),
@@ -1614,6 +1622,8 @@ module cpu_top (
         .cdb1_valid           (cdb1_valid),
         .cdb1_ptag            (cdb1_ptag),
         .cdb1_value           (cdb1_value),
+        .wb_rob_valid         (mem_wb_valid),
+        .wb_rob_tag           (mem_wb_rob_tag),
         .issue_v_o            (rs_sh_issue_v),
         .issue_rs1_val_o      (rs_sh_issue_rs1_val),
         .issue_rs2_val_o      (rs_sh_issue_rs2_val),
@@ -1630,7 +1640,9 @@ module cpu_top (
         .issue_peek_b_src_o   (rs_sh_issue_peek_b_src),
         .issue_peek_wb_sel_o  (rs_sh_issue_peek_wb_sel),
         .issue_peek_mem_read_o   (rs_sh_issue_peek_mem_read),
+        .issue_peek_mem_write_o  (rs_sh_issue_peek_mem_write),
         .issue_peek_mem_funct3_o (rs_sh_issue_peek_mem_funct3),
+        .issue_peek_reg_write_o  (rs_sh_issue_peek_reg_write),
         .issue_peek_rd_arch_o (rs_sh_issue_peek_rd_arch),
         .issue_peek_instr_o   (rs_sh_issue_peek_instr),
         .issue_peek_rd_ptag_o (rs_sh_issue_peek_rd_ptag),
