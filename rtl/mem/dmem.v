@@ -23,9 +23,12 @@ module dmem #(
     input  wire [3:0]  be,
     input  wire [31:0] wdata,
     output wire [31:0] rdata,
-    // Port B：只读端口（slot1 LOAD）
+    // Port B：slot1 memory port
     input  wire [31:0] addr_b,
     input  wire        re_b,
+    input  wire        we_b,
+    input  wire [3:0]  be_b,
+    input  wire [31:0] wdata_b,
     output wire [31:0] rdata_b
 );
     localparam MEM_IDX_W   = $clog2(MEM_WORDS);
@@ -98,6 +101,10 @@ module dmem #(
         {8{be[3]}}, {8{be[2]}}, {8{be[1]}}, {8{be[0]}}
     };
     wire [31:0] merged_word = (src_word & ~be_mask) | (wdata & be_mask);
+    wire [31:0] be_mask_b = {
+        {8{be_b[3]}}, {8{be_b[2]}}, {8{be_b[1]}}, {8{be_b[0]}}
+    };
+    wire [31:0] merged_word_b = (srcb_word & ~be_mask_b) | (wdata_b & be_mask_b);
 
     // 装配 refill 行（Port A）：从 mem 读 LINE_WORDS 字；若 we 命中那一字则替换
     integer w;
@@ -119,13 +126,22 @@ module dmem #(
         if (we) hit_writeback_block[a_off*32 +: 32] = merged_word;
     end
 
-    // Port B refill（不写 mem）
+    // Port B refill
     reg [BLK_BITS-1:0] refill_block_b;
     always @(*) begin
         refill_block_b = {BLK_BITS{1'b0}};
         for (w = 0; w < LINE_WORDS; w = w + 1) begin
-            refill_block_b[w*32 +: 32] = mem[b_blk_base + w[MEM_IDX_W-1:0]];
+            if (we_b && (b_off == w[OFF_W-1:0]))
+                refill_block_b[w*32 +: 32] = merged_word_b;
+            else
+                refill_block_b[w*32 +: 32] = mem[b_blk_base + w[MEM_IDX_W-1:0]];
         end
+    end
+
+    reg [BLK_BITS-1:0] hit_writeback_block_b;
+    always @(*) begin
+        hit_writeback_block_b = b_hit0 ? c_data[0][b_idx] : c_data[1][b_idx];
+        if (we_b) hit_writeback_block_b[b_off*32 +: 32] = merged_word_b;
     end
 
     integer i, k;
@@ -177,9 +193,9 @@ module dmem #(
             if (a_hit1) c_data[1][a_idx] <= hit_writeback_block;
         end
 
-        // ----- Port B 统计与回填（只读，不写主存）-----
+        // ----- Port B 统计与读写 -----
         // Port A 与 Port B 同 cycle 同 set 都 miss 时优先 A，B 跳过回填
-        if (re_b) begin
+        if (re_b || we_b) begin
             stat_access_b <= stat_access_b + 1;
             if (b_hit) stat_hit_b  <= stat_hit_b  + 1;
             else       stat_miss_b <= stat_miss_b + 1;
@@ -192,6 +208,12 @@ module dmem #(
             end else if (b_hit && !(access && a_hit && (a_idx == b_idx))) begin
                 // B hit 且与 A 不冲突 → 更新 LRU（如与 A 冲突，A 已更新过）
                 c_lru[b_idx] <= ~b_hit1;
+            end
+
+            if (we_b && !(access && (a_idx == b_idx))) begin
+                mem[b_midx] <= merged_word_b;
+                if (b_hit0) c_data[0][b_idx] <= hit_writeback_block_b;
+                if (b_hit1) c_data[1][b_idx] <= hit_writeback_block_b;
             end
         end
     end

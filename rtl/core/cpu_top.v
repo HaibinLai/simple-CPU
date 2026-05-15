@@ -482,9 +482,10 @@ module cpu_top (
                            (id1_opcode == `OP_LUI)  || (id1_opcode == `OP_AUIPC);
     // R3 扩展：条件分支（在 EX1 解析，隐式预测 not-taken）也可进入 slot1。
     wire id1_is_branch_op = (id1_opcode == `OP_BRANCH);
-    // R4 扩展：load 也可进入 slot1（D$ 加只读端口 B；slot1 LOAD 1 周期完成）。
+    // R4/R5 扩展：load/store 也可进入 slot1（经 D$ port B）。
     wire id1_is_load_op   = (id1_opcode == `OP_LOAD);
-    wire id1_is_pairable  = id1_is_alu_only || id1_is_branch_op || id1_is_load_op;
+    wire id1_is_store_op  = (id1_opcode == `OP_STORE);
+    wire id1_is_pairable  = id1_is_alu_only || id1_is_branch_op || id1_is_load_op || id1_is_store_op;
 
     // Slot1 control 解码（仅供约束检查；暂不用于执行）
     wire [2:0] id1_imm_type;
@@ -520,8 +521,10 @@ module cpu_top (
     // 1. Slot1 有效 && 是 可配对 指令 (ALU-only 或 条件分支)
     // 2. 没有 same-cycle RAW：slot1 rs1/rs2 不与 slot0 rd 重叠（仅在 slot0 有写回时检查）
     wire slot1_rs1_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_IMM) ||
-                          (id1_opcode == `OP_BRANCH) || (id1_opcode == `OP_LOAD);
-    wire slot1_rs2_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_BRANCH);
+                          (id1_opcode == `OP_BRANCH) || (id1_opcode == `OP_LOAD) ||
+                          (id1_opcode == `OP_STORE);
+    wire slot1_rs2_used = (id1_opcode == `OP_REG) || (id1_opcode == `OP_BRANCH) ||
+                          (id1_opcode == `OP_STORE);
     // LUI/AUIPC 不读寄存器，不参与 RAW/load-use 检查
     // OP_LOAD 仅读 rs1（基址），不读 rs2
 
@@ -543,8 +546,9 @@ module cpu_top (
     wire id1_no_load_use_hazard;
     // R2 BUG#5: cross-cycle WAW（在 id_ex/ex_mem/... 声明之后定义）
     wire id1_no_xcycle_waw;
-    // R4: slot1 LOAD 与在飞 slot0 STORE 的潜在地址别名（保守阻塞）
+    // R4/R5: slot1 memory ops 的保守顺序约束
     wire id1_no_store_alias_hazard;
+    wire slot0_mem_pipe_busy;
 
     // R3 放宽：允许 slot0 为 branch / JAL / JALR / ecall / mret / illegal。
     // 详细推导：
@@ -659,6 +663,7 @@ module cpu_top (
     reg [2:0]  id1_ex_imm_type;
     reg [2:0]  id1_ex_br_type;       // R3: 支持 slot1 = 条件分支
     reg        id1_ex_mem_read;      // R4: slot1 LOAD
+    reg        id1_ex_mem_write;     // R5: slot1 STORE
     reg [2:0]  id1_ex_mem_funct3;    // R4: LB/LH/LW/LBU/LHU
     reg [3:0]  id1_ex_rob_tag;
     reg [5:0]  id1_ex_rd_ptag;
@@ -770,18 +775,24 @@ module cpu_top (
         )
     );
 
-    // R4: slot1 LOAD 在 EX1 组合读 D-Cache port B；slot0 store 要 4 周期后才落
-    // dmem，因此任何在飞的 slot0 store 都可能与 slot1 LOAD 形成地址别名 RAW。
-    // 当前没做地址比较 / store-buffer，保守做法：在飞 slot0 store 期间不发 slot1 LOAD。
-    // 包括 ID2 同 cycle slot0=STORE 的情形（因 slot0 4 周期后才写）。
+    assign slot0_mem_pipe_busy =
+        (id_mem_read || id_mem_write) ||
+        (id_ex_valid   && (id_ex_mem_read   || id_ex_mem_write)) ||
+        (ex_mem_valid  && (ex_mem_mem_read  || ex_mem_mem_write)) ||
+        (ex2_agu_valid && (ex2_agu_mem_read || ex2_agu_mem_write)) ||
+        (agu_mem_valid && (agu_mem_mem_read || agu_mem_mem_write));
+
+    // slot1 LOAD: block on any older slot0 store.
+    // slot1 STORE: block until slot0 memory pipe is fully empty.
     assign id1_no_store_alias_hazard = ~(
-        id1_is_load_op && (
-            (id_mem_write) ||                                         // slot0 同 cycle = STORE
-            (id_ex_valid    && id_ex_mem_write   ) ||
-            (ex_mem_valid   && ex_mem_mem_write  ) ||
-            (ex2_agu_valid  && ex2_agu_mem_write ) ||
-            (agu_mem_valid  && agu_mem_mem_write )
-        )
+        (id1_is_load_op && (
+            id_mem_write ||
+            (id_ex_valid    && id_ex_mem_write) ||
+            (ex_mem_valid   && ex_mem_mem_write) ||
+            (ex2_agu_valid  && ex2_agu_mem_write) ||
+            (agu_mem_valid  && agu_mem_mem_write)
+        )) ||
+        (id1_is_store_op && slot0_mem_pipe_busy)
     );
 
     // ===== Milestone 2: Slot1 ID/EX Pipeline Update (Phase 2B) =====
@@ -802,6 +813,7 @@ module cpu_top (
             id1_ex_imm_type   <= `IMM_NONE;
             id1_ex_br_type    <= `BR_NONE;
             id1_ex_mem_read   <= 1'b0;
+            id1_ex_mem_write  <= 1'b0;
             id1_ex_mem_funct3 <= 3'b0;
             id1_ex_rd_ptag    <= 6'b0;
             id1_ex_rs1_ptag   <= 6'b0;
@@ -817,6 +829,7 @@ module cpu_top (
             id1_ex_valid      <= 1'b0;
             id1_ex_br_type    <= `BR_NONE;
             id1_ex_mem_read   <= 1'b0;
+            id1_ex_mem_write  <= 1'b0;
             id1_ex_from_rs    <= 1'b0;
         end else if (rs_issue_via_b) begin
             // T2b-step3a-v1 (Option B): RS issues into slot1 EX1b pipe.
@@ -834,8 +847,9 @@ module cpu_top (
             id1_ex_wb_sel     <= rs_sh_issue_peek_wb_sel;
             id1_ex_valid      <= 1'b1;
             id1_ex_imm_type   <= `IMM_NONE;
-            id1_ex_br_type    <= `BR_NONE;
+            id1_ex_br_type    <= rs_sh_issue_peek_br_type;
             id1_ex_mem_read   <= rs_sh_issue_peek_mem_read;
+            id1_ex_mem_write  <= rs_sh_issue_peek_mem_write;
             id1_ex_mem_funct3 <= rs_sh_issue_peek_mem_funct3;
             id1_ex_rob_tag    <= rs_sh_issue_peek_rob_tag;
             id1_ex_rd_ptag    <= rs_sh_issue_peek_rd_ptag;
@@ -860,6 +874,7 @@ module cpu_top (
             id1_ex_imm_type   <= id1_imm_type;
             id1_ex_br_type    <= id1_br_type;
             id1_ex_mem_read   <= id1_mem_read;     // R4: slot1 LOAD
+            id1_ex_mem_write  <= id1_mem_write;
             id1_ex_mem_funct3 <= id1_mem_funct3;
             id1_ex_rob_tag    <= rob_alloc_tag_1;     // M3.2: 携带 ROB tag
             id1_ex_rd_ptag    <= rn_s1_rd_ptag_new;   // M3.4b: 携带 rename ptag
@@ -1084,13 +1099,15 @@ module cpu_top (
         .y  (slot1_alu_y)
     );
 
-    // Slot1 分支判断使用前递后的 rs1/rs2
+    // Slot1 分支判断：RS B-path 下使用 RS 携带的就绪值，避免依赖已清零的 ptag。
+    wire [31:0] slot1_br_rs1 = id1_ex_from_rs ? id1_ex_rs1_val : slot1_rs1_fwd;
+    wire [31:0] slot1_br_rs2 = id1_ex_from_rs ? id1_ex_rs2_val : slot1_rs2_fwd;
     wire slot1_br_taken;
     branch_unit u_bu_slot1 (
         .br_type (id1_ex_br_type),
         .is_jump (1'b0),                 // slot1 不接受 JAL/JALR（需 redirect+rd 写）
-        .rs1     (slot1_rs1_fwd),
-        .rs2     (slot1_rs2_fwd),
+        .rs1     (slot1_br_rs1),
+        .rs2     (slot1_br_rs2),
         .taken   (slot1_br_taken)
     );
 
@@ -1300,19 +1317,55 @@ module cpu_top (
 
     wire [31:0] dmem_rdata;
     wire [31:0] dmem_rdata_b;     // R4: slot1 LOAD 读端口 B
+    wire [3:0]  dmem_be_a = (agu_mem_valid && (agu_mem_mem_read || agu_mem_mem_write)) ? mem_be : 4'b0000;
     // R4: slot1 LOAD 地址 = slot1 ALU 结果（rs1+imm，OP_LOAD 已置 a_src=RS1, b_src=IMM）
     wire [31:0] slot1_mem_addr   = slot1_alu_y;
+    wire [1:0]  slot1_byte_off   = slot1_mem_addr[1:0];
     wire        slot1_mem_re     = id1_ex_valid && id1_ex_mem_read && !ex_redirect;
+    wire        slot1_mem_we     = id1_ex_valid && id1_ex_mem_write && !ex_redirect;
+    reg  [3:0]  slot1_mem_be;
+    reg  [31:0] slot1_mem_wdata_aligned;
+    always @(*) begin
+        slot1_mem_be = 4'b0000;
+        slot1_mem_wdata_aligned = 32'b0;
+        case (id1_ex_mem_funct3)
+            3'b000: begin // SB
+                case (slot1_byte_off)
+                    2'd0: begin slot1_mem_be = 4'b0001; slot1_mem_wdata_aligned = {24'b0, slot1_br_rs2[7:0]}; end
+                    2'd1: begin slot1_mem_be = 4'b0010; slot1_mem_wdata_aligned = {16'b0, slot1_br_rs2[7:0], 8'b0}; end
+                    2'd2: begin slot1_mem_be = 4'b0100; slot1_mem_wdata_aligned = {8'b0, slot1_br_rs2[7:0], 16'b0}; end
+                    2'd3: begin slot1_mem_be = 4'b1000; slot1_mem_wdata_aligned = {slot1_br_rs2[7:0], 24'b0}; end
+                endcase
+            end
+            3'b001: begin // SH
+                if (slot1_byte_off == 2'd0) begin
+                    slot1_mem_be = 4'b0011;
+                    slot1_mem_wdata_aligned = {16'b0, slot1_br_rs2[15:0]};
+                end else begin
+                    slot1_mem_be = 4'b1100;
+                    slot1_mem_wdata_aligned = {slot1_br_rs2[15:0], 16'b0};
+                end
+            end
+            3'b010: begin // SW
+                slot1_mem_be = 4'b1111;
+                slot1_mem_wdata_aligned = slot1_br_rs2;
+            end
+            default: ;
+        endcase
+    end
     dmem u_dmem (
         .clk    (clk),
         .addr   (agu_mem_alu_y),
         .we     (agu_mem_mem_write & agu_mem_valid),
-        .be     (mem_be),
+        .be     (dmem_be_a),
         .wdata  (mem_wdata_aligned),
         .rdata  (dmem_rdata),
-        // R4: 第二只读端口
+        // slot1 memory port B
         .addr_b (slot1_mem_addr),
         .re_b   (slot1_mem_re),
+        .we_b   (slot1_mem_we),
+        .be_b   (slot1_mem_be),
+        .wdata_b(slot1_mem_wdata_aligned),
         .rdata_b(dmem_rdata_b)
     );
 
@@ -1391,7 +1444,6 @@ module cpu_top (
     // R4: slot1 也可以是 LOAD（1 周期完成：组合读 D-Cache port B + 符号扩展）。
     //     slot1_load_data 在 EX1 同 cycle 组合产生。
 
-    wire [1:0] slot1_byte_off = slot1_mem_addr[1:0];
     reg [31:0] slot1_load_data;
     always @(*) begin
         case (id1_ex_mem_funct3)
@@ -1569,21 +1621,17 @@ module cpu_top (
                             && !slot0_pop_prearb
                             && rs_issue_age_allow;
 
-    // T2b-step3a-v1 (Option B): RS B-path. When the A-path is unavailable
-    // (e.g. slot0 is non-ALU, or slot0 wants to pop and is older), route the
-    // RS-ready entry into the slot1 EX1b pipe instead. Conditions:
+    // T2b-step3a-v1 (Option B): RS B-path. When the A-path is unavailable,
+    // route the RS-ready entry into the slot1 EX1b pipe instead. Conditions:
     //   - RS has a ready entry
     //   - A-path is not firing
     //   - slot1 EX1b pipe is idle this cycle (no slot1 IFQ pop)
     //   - no global stall / redirect
-    //   - rename block on slot1 must not gate it (we don't allocate; we just
-    //     issue an already-renamed entry from RS)
+    //   - JUMP 仍排除；STORE 仅在 slot0 memory pipe 为空时允许
     assign rs_issue_via_b = rs_sh_issue_peek_v
                             && !rs_issue_allow
-                            && rs_sh_issue_peek_reg_write
-                            && !rs_sh_issue_peek_mem_write
-                            && (rs_sh_issue_peek_br_type == `BR_NONE)
                             && !rs_sh_issue_peek_is_jump
+                            && !(rs_sh_issue_peek_mem_write && slot0_mem_pipe_busy)
                             && !ifq_pop_slot1
                             && !ex_redirect
                             && !stall;
@@ -1823,7 +1871,7 @@ module cpu_top (
     wire        rob_alloc_rw_0_w = id_reg_write;
     wire        rob_alloc_rw_1_w = id1_reg_write;
     wire        rob_alloc_st_0_w = id_mem_write;
-    wire        rob_alloc_st_1_w = 1'b0;        // slot1 不会是 store
+    wire        rob_alloc_st_1_w = id1_is_store_op;
     wire        rob_alloc_br_0_w = (id_br_type != `BR_NONE) || id_is_jump;
     // R3: slot1 可以是条件分支
     wire        rob_alloc_br_1_w = id1_is_branch_op;
