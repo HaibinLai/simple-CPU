@@ -10,6 +10,8 @@ Verilog, developed incrementally for teaching and learning purposes.
 
 ## Architecture Overview
 
+![CPU Architecture Block Diagram](docs/cpu_architecture.png)
+
 | Feature | Implementation |
 |---------|---------------|
 | ISA | RV32I (40 instructions) |
