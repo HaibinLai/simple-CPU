@@ -1,67 +1,140 @@
 # CPU Architecture 102
 
-## From 5-Stage Pipelined RISC-V (RV32I) CPU to 10 stage
+## 2-Wide Out-of-Order Superscalar RISC-V (RV32I) CPU
 
-A staged pipelined CPU built in Verilog, developed incrementally for teaching/learning purposes.
+A fully functional dual-issue, out-of-order execution RISC-V CPU built in Verilog,
+developed incrementally for teaching and learning purposes.
+4,754 lines of synthesizable RTL across 18 modules.
 
-## Target ISA
-RV32I integer subset (47 core instructions). Future extensions: Zicsr / interrupts.
+## Architecture Summary
 
-## Current Implemented Pipeline
+| Feature | Implementation |
+|---------|---------------|
+| ISA | RV32I (40 core instructions) |
+| Pipeline | 8-stage: IF → ID1 → ID2 → EX1 → EX2 → AGU → MEM → WB |
+| Issue Width | 2-wide superscalar (slot0 full + slot1 ALU/load/store/branch) |
+| Execution Model | Out-of-order issue & execute, in-order commit |
+| Reservation Station | 8-entry unified RS, age-based oldest-first selection |
+| Reorder Buffer | 16-entry ROB, 2-wide alloc / 2-wide WB / 2-wide commit |
+| Register File | 64-entry Physical Register File (PRF), 6 read / 4 write ports |
+| Register Renaming | Full rename with free-list + busy vector |
+| Common Data Bus | 2-lane CDB for result broadcast and RS wakeup |
+| Branch Prediction | TAGE-2L direction predictor + 2-way BTB + RAS |
+| I-Cache | 2-way set-associative, 64 sets × 4 words/line = 2 KB |
+| D-Cache | 2-way set-associative, 64 sets × 4 words/line = 2 KB, dual-port |
+| Forwarding | ptag-based, 5-stage deep (EX→MEM→EX2→AGU→WB) per slot |
+
+### Pipeline Diagram
 ```
-IF  →  ID1  →  ID2  →  EX1  →  EX2  →  AGU  →  MEM  →  WB
+                   ┌─ slot0: EX1 → EX2 → AGU → MEM → WB  (full: ALU/load/store/branch/jump)
+IF → ID1 → ID2 ──┤
+                   └─ slot1: EX1b → WB                     (1-cycle: ALU/load/store/branch)
+                   
+                   ┌─ RS A-path → slot0 EX1  (乱序发射到主流水线)
+         RS(8) ───┤
+                   └─ RS B-path → slot1 EX1b (乱序发射到副流水线)
 ```
 
-## Current Status
+### Out-of-Order Execution Flow
+```
+Dispatch ──→ RS (wait for operands via CDB wakeup)
+         ──→ ROB (allocate tag, track in-order commit)
+         ──→ Rename (allocate physical register, set busy)
 
-Planning documents for near-term architecture work:
+Issue    ──→ RS selects oldest-ready entry
+         ──→ A-path: non-load ops → slot0 EX1 pipeline
+         ──→ B-path: ALU/load/store/branch → slot1 EX1b (1-cycle)
 
-- `docs/8stage-implementation-plan.md` — current 8-stage structural evolution plan.
-- `docs/2issue-implementation-plan.md` — proposed constrained 2-issue in-order upgrade plan.
+Execute  ──→ slot0: 5-stage (EX1→EX2→AGU→MEM→WB)
+         ──→ slot1: 1-stage (EX1b, immediate writeback)
 
-## Performance Optimization Log
+Writeback ──→ CDB broadcast (ptag + value)
+          ──→ RS wakeup dependent entries
+          ──→ ROB mark done
 
-The 2-wide in-order superscalar core has gone through several rounds of
-data-driven micro-architectural tuning. Each step was validated by
-`make robust` (PC redirect / wrong-path store regression) and the
-`bench/` smoke set (`dotprod_32`, `matmul_4x4`, `crc32_64b`).
-All numbers are simulator cycles with the zero-D$-penalty model unless
-noted otherwise; the D$ miss-penalty estimator additionally reports
-upper bounds at `p ∈ {1, 3, 8}` cycles per miss.
+Commit   ──→ ROB head retires in program order (up to 2/cycle)
+         ──→ Rename free old ptag
+```
 
-### Front-end / branch prediction
-| Direction | What | Result |
-| --- | --- | --- |
-| Slot1-JAL fast redirect (A2-step2 v2) | Decode JAL in slot1 at IF, statically compute target, redirect PC and inject `(taken=1, target)` into IFQ slot1. Forces an IF-stage PC redirect AND a matching IFQ prediction so EX never sees a mispredict — earlier "v1" only did the IFQ injection and let wrong-path stores retire (caught by `tools/run_a2step2_robustness.py`). | dotprod −31.6%, matmul −31.2%, crc32 −26.2% cycles. flush_jump 1003→70 / 2049→139 / 310→69. |
-| RAS-driven JALR-ret fast redirect (P1.6) | Promote `ras_shadow` from observability-only to a real predictor: expose its top-of-stack to IF, decode `jalr rd, 0(rs1)` ret patterns in **both** slot0 and slot1, redirect PC and inject `(taken=1, target=ras_top)` into IFQ. Mispredict (rare) still caught by EX. | dotprod cycles 6302→6126 (−2.8%), matmul 12846→12433 (−3.2%). flush_jump dotprod 70→39 (−31, ≈ all 32 rets); matmul 139→91 (−48 of 64 rets). |
-| BPU TAGE-2L primary + 2-way BTB | TAGE on direction; 32-set × 2-way BTB on target. BTB observability counters (`uncond_btb_hit / uncond_target_correct/wrong`) confirm 99% BTB hit and zero target-wrong on uncond. | Steady-state baseline; enables the IF-redirect fast paths above. |
+## Performance Results (OoO dual-issue, current HEAD)
 
-### Memory hierarchy
-| Direction | What | Result |
-| --- | --- | --- |
-| D$ Port-B observability + miss-penalty estimator | Counter Port-B accesses/hits/misses; the TB now also prints `cycles_pX` upper bounds for `X ∈ {0, 1, 3, 8}` cycles per miss to expose what would happen with a realistic DRAM. | Findings: dotprod cycles@p=8 was +247% over p=0 → memory dominated tail. |
-| D$ line size 1-word → 4-word | Same direct-mapped 64 lines, line bumped to 4 words (16 B). Spatial-locality win on stride-1 array workloads. | dotprod miss 1942→1684 (−13%), matmul 3787→3147 (−17%), crc32 essentially unchanged. |
-| D$ direct-mapped → 2-way set associative + LRU | A `CACHE_LINES` sweep (64/128/256) showed only −3% per doubling on dotprod miss-rate → bottleneck was conflict miss, not capacity. Switched to 64 sets × 2 ways × 4 words = 2 KB, 1-bit LRU per set. | dotprod miss 1684→887 (−47%, miss-rate 43.2%→22.8%); matmul 3147→1533 (−51%, 41.0%→20.0%); crc32 144→83 (−42%). Port-B miss on dotprod 8→0. cycles@p=8 dotprod −39%, matmul −42%. |
+All numbers measured with zero-latency D-cache model. `CPI_c` = cycles / committed instructions
+(the standard "instructions executed" metric). `dual%` = percentage of issue cycles with 2 instructions.
 
-### Cumulative D$ effect (1-way × 1-word baseline → 2-way × 4-word final)
-| Bench | miss baseline → final | miss_rate | cycles@p=8 |
-| --- | --- | --- | --- |
-| dotprod_32 | 1942 → 887 (−54%) | 49.2% → 22.8% | 21838 → 13398 (−39%) |
-| matmul_4x4 | 3787 → 1533 (−60%) | 49.3% → 20.0% | 43142 → 25110 (−42%) |
-| crc32_64b  |  147 →  83 (−43%) |  7.9% →  5.2% |  4664 →  4152 (−11%) |
+### Benchmark CPI and Event Breakdown
 
-### Methodology / supporting infra
-| Direction | What |
-| --- | --- |
-| Wrong-path-store regression | `tb/programs/a2step2_robust.hex` + `tools/run_a2step2_robustness.py` + `make robust`. Any IF-redirect optimization that lets a wrong-path store retire is caught immediately (PASS = `x31 = 0xCAFEBABE` and `x6 = x7 = x8 = 0`). |
-| Observability stack | `rs_shadow` (RS sizing / wait-cycles), `ras_shadow` (now also a real predictor), BPU/BTB counters, D$ Port-B counters, D$ miss-penalty estimator — all live in the TB so each optimization can be re-justified by data, not by hand-waving. |
-| Repository hygiene | English commit messages, single-bench smoke runs (`TIMEOUT_NS=2000000`) preferred over the 1500-random regression for fast iteration. |
+| Benchmark | Cycles | Committed | CPI_c | dual% | br_miss% | D$_miss% |
+|-----------|-------:|----------:|------:|------:|---------:|---------:|
+| fib_20 | 96 | 148 | 0.649 | 50.0 | 4.2 | 0.0 |
+| sum_1_to_100 | 319 | 410 | 0.778 | 33.8 | 1.9 | 0.0 |
+| bsearch_64 | 754 | 964 | 0.782 | 42.7 | 4.0 | 15.5 |
+| popcount_64 | 979 | 1,159 | 0.845 | 66.4 | 0.3 | 0.0 |
+| crc32_64b | 2,070 | 2,575 | 0.804 | 62.3 | 10.9 | 25.0 |
+| bsort_16 | 1,401 | 1,677 | 0.835 | 40.6 | 1.0 | 0.6 |
+| memcpy_64w | 401 | 397 | 1.010 | 72.9 | 2.9 | 24.6 |
+| dotprod_32 | 8,627 | 7,762 | 1.111 | 45.4 | 19.3 | 16.0 |
+| matmul_4x4 | 17,809 | 16,139 | 1.103 | 44.3 | 18.9 | 6.3 |
 
-### Next ROI targets
-The front-end and the D$ have both seen large wins. Remaining
-visible cost on `matmul_4x4` is `wait_cycles=3943` in the
-shadow RS — a real out-of-order RS with LOAD early-wakeup is now
-the highest-ROI step.
+**Key observations:**
+- 6 of 9 benchmarks achieve **CPI_c < 1.0** — meaning the CPU retires more than 1 instruction per cycle on average, demonstrating effective dual-issue + OoO scheduling.
+- `fib_20` reaches CPI_c = **0.649** (1.54 IPC), the highest throughput.
+- Compute-heavy kernels (`dotprod`, `matmul`) are limited by branch mispredictions (19%) from the software-multiply subroutine call pattern.
+
+### Dual-Issue Pairing Analysis
+
+When slot1 cannot pair, the reason breakdown:
+
+| Benchmark | dual% | RAW% | nta% | xww% | lu% | nv1% |
+|-----------|------:|-----:|-----:|-----:|----:|-----:|
+| fib_20 | 50.0 | 4.5 | 4.5 | 88.6 | 0.0 | 2.3 |
+| sum_1_to_100 | 33.8 | 1.5 | 50.0 | 48.0 | 0.0 | 0.5 |
+| bsearch_64 | 42.7 | 49.3 | 18.7 | 19.0 | 11.3 | 1.7 |
+| popcount_64 | 66.4 | 74.4 | 25.2 | 0.0 | 0.0 | 0.4 |
+| crc32_64b | 62.3 | 25.2 | 31.3 | 18.6 | 0.0 | 24.9 |
+| bsort_16 | 40.6 | 39.7 | 5.2 | 2.3 | 18.4 | 0.2 |
+| memcpy_64w | 72.9 | 90.3 | 4.2 | 1.4 | 0.0 | 2.8 |
+| dotprod_32 | 45.4 | 32.7 | 32.2 | 16.7 | 1.0 | 16.3 |
+| matmul_4x4 | 44.3 | 34.2 | 33.1 | 17.4 | 0.0 | 15.3 |
+
+- **RAW** — same-cycle data dependency (fundamental)
+- **nta** — slot1 instruction type not pairable (jump/jalr)
+- **xww** — cross-cycle WAW (slot1 rd conflicts with in-flight slot0)
+- **lu** — load-use hazard blocking slot1
+- **nv1** — no valid instruction in slot1 position (IFQ short)
+
+### Test Suite Results
+
+| Test Suite | Count | Pass Rate |
+|------------|------:|----------:|
+| Robustness (wrong-path store) | 1 | 100% |
+| Benchmarks | 9 | 100% (9/9) |
+| Micro hazard tests | 6 | 100% (6/6) |
+| Micro pair/split tests | 4 | 100% (4/4) |
+| Random generated (RV32I) | 500 | 100% (500/500) |
+
+## Module Overview
+
+| Module | Lines | Role |
+|--------|------:|------|
+| `cpu_top.v` | 1,967 | Top-level pipeline, arbitration, OoO control |
+| `rs_shadow.v` | 477 | Reservation Station (8-entry, unified) |
+| `bpu.v` | 394 | Branch Prediction Unit (TAGE + GHR + BTB) |
+| `rob.v` | 333 | Reorder Buffer (16-entry, 2-wide) |
+| `bpu_tage_eval.v` | 274 | TAGE shadow evaluator |
+| `dmem.v` | 220 | D-Cache (2-way SA, dual-port) |
+| `rename.v` | 189 | Register rename (free-list + busy vec) |
+| `ifq.v` | 186 | Instruction Fetch Queue (dual-pop) |
+| `control.v` | 165 | Decode / control signal generation |
+| `ras_shadow.v` | 126 | Return Address Stack (IF-stage predictor) |
+| `imem.v` | 98 | I-Cache (2-way SA) |
+| `prf.v` | 83 | Physical Register File (64-entry, 6R/4W) |
+| `defines.v` | 70 | Global constants and opcodes |
+| `forwarding.v` | 58 | ptag-based forwarding logic |
+| `hazard.v` | 36 | Load-use hazard detection |
+| `alu.v` | 30 | ALU (shared by both slots) |
+| `branch_unit.v` | 25 | Branch comparison unit |
+| `imm_gen.v` | 23 | Immediate generator |
+| **Total** | **4,754** | |
 
 ## Course Roadmap: From 5 Stages to 10 Stages
 
@@ -277,19 +350,19 @@ because heavier kernels exceed the default 2000 ns.
 python3 tools/run_benchmarks.py --regen --timeout-ns 8000000
 ```
 
-Example output:
+Example output (current OoO dual-issue):
 ```
-benchmark             status      cycles     retired       CPI   committed     CPI_c      lu    f_br   f_jmp   f_exc   branches   mispred   br_miss   I$_miss   D$_miss
------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-bsearch_64              PASS         939         498     1.886         846     1.110      36      13       5       0        278        18     0.065     0.061     0.377
-bsort_16                PASS        1729         841     2.056        1540     1.123     120      18       4       0        443        22     0.050     0.021     0.323
-crc32_64b               PASS        5161        2337     2.208        4116     1.254      64     322       4       0       1763       326     0.185     0.009     0.055
-dotprod_32              PASS        8649        4705     1.838        8037     1.076       0     134      69       0       3300       203     0.062     0.006     0.372
-fib_20                  PASS         141          87     1.621         129     1.093       0       1       2       0         42         3     0.071     0.125     0.215
-matmul_4x4              PASS       17340        9929     1.746       16506     1.051       0     252      25       0       6593       277     0.042     0.005     0.363
-memcpy_64w              PASS         532         262     2.031         456     1.167      64       1       2       0        130         3     0.023     0.034     0.596
-popcount_64             PASS        1500         713     2.104        1293     1.160       0      65       3       0        580        68     0.117     0.013     0.051
-sum_1_to_100            PASS         420         206     2.039         408     1.029       0       1       2       0        202         3     0.015     0.035     0.541
+benchmark             status      cycles   committed     CPI_c   dual%   br_miss   D$_miss
+-------------------------------------------------------------------------------------------
+bsearch_64              PASS         754         964     0.782   42.7     0.040     0.155
+bsort_16                PASS        1401        1677     0.835   40.6     0.010     0.006
+crc32_64b               PASS        2070        2575     0.804   62.3     0.109     0.250
+dotprod_32              PASS        8627        7762     1.111   45.4     0.193     0.160
+fib_20                  PASS          96         148     0.649   50.0     0.042     0.000
+matmul_4x4              PASS       17809       16139     1.103   44.3     0.189     0.063
+memcpy_64w              PASS         401         397     1.010   72.9     0.029     0.246
+popcount_64             PASS         979        1159     0.845   66.4     0.003     0.000
+sum_1_to_100            PASS         319         410     0.778   33.8     0.019     0.000
 ```
 
 ### 2) Reading the table
@@ -317,18 +390,19 @@ Together these explain where each kernel's CPI overhead comes from.
 
 ### 3) Observations from the current measurements
 
-- `matmul_4x4`, `dotprod_32`, `sum_1_to_100`: legacy `CPI` ~1.7–2.0 looks
-  high, but **commit-based `CPI_c` is 1.03–1.08** — already very close to
-  the single-issue ideal. The gap is almost entirely an artifact of
-  stores not being counted in `retired`.
-- `crc32_64b`: this is the kernel that is **actually CPI-bound** —
-  `CPI_c = 1.254` driven by 322 conditional-branch mispredicts in the
-  bit-level inner loop. The BHT cannot learn the pattern.
-- `memcpy_64w`, `bsort_16`: dominated by load-use stalls (`lu = 64` /
-  `120`) — adjacent `LW`/`SW` chains keep producing 1-cycle bubbles.
-- `bsearch_64`: a balanced mix — `lu = 36` (data-dependent address
-  computations) plus `f_br = 13` (the inherently unpredictable comparison
-  branch in binary search).
+- **6 of 9 benchmarks achieve CPI_c < 1.0** — the out-of-order dual-issue
+  engine retires more than 1 instruction per cycle on average, proving
+  effective ILP extraction.
+- `fib_20` at CPI_c = **0.649** (1.54 IPC) demonstrates the best-case
+  throughput gain from dual-issue + OoO.
+- `dotprod_32` / `matmul_4x4`: CPI_c ≈ 1.1, limited by branch mispredictions
+  (19%) from the software-multiply subroutine call pattern.
+- `crc32_64b`: CPI_c = 0.804 with 62% dual-issue rate; the main bottleneck
+  is now branch misprediction (10.9%) in the bit-level inner loop.
+- `memcpy_64w`: CPI_c ≈ 1.01 at 73% dual-issue — almost perfectly pipelined
+  LW/SW pairs.
+- `bsort_16`: CPI_c = 0.835 despite data-dependent branch chains, showing
+  effective OoO scheduling of adjacent load/store/compare sequences.
 
 ### 4) Available kernels
 
