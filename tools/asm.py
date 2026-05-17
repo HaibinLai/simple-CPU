@@ -99,6 +99,30 @@ class Asm:
     def sh(self, rs2, rs1, imm):  self.emit(SH(rs2, rs1, imm))
     def sb(self, rs2, rs1, imm):  self.emit(SB(rs2, rs1, imm))
 
+    # ---- MMIO helpers ----
+    UART_TX = 0x10000000
+
+    def putchar(self, reg: int, tmp: int = 29) -> None:
+        """Write byte in reg[7:0] to UART TX (0x10000000).
+        Uses tmp register to hold the UART address."""
+        self.li(tmp, self.UART_TX)
+        self.sb(reg, tmp, 0)
+
+    def puts(self, addr_reg: int, tmp1: int = 28, tmp2: int = 29) -> None:
+        """Print null-terminated string at [addr_reg].
+        Uses tmp1 for byte, tmp2 for UART address. Clobbers addr_reg."""
+        self.li(tmp2, self.UART_TX)
+        self.label("__puts_" + str(len(self._items)))
+        lbl_loop = "__puts_l_" + str(len(self._items))
+        lbl_end  = "__puts_e_" + str(len(self._items))
+        self.label(lbl_loop)
+        self.lbu(tmp1, addr_reg, 0)
+        self.beq(tmp1, 0, lbl_end)
+        self.sb(tmp1, tmp2, 0)
+        self.addi(addr_reg, addr_reg, 1)
+        self.j(lbl_loop)
+        self.label(lbl_end)
+
     # ---- control ----
     def j(self, label: str) -> None:
         self._items.append(("jal", (0, label)))

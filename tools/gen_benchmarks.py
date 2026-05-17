@@ -448,6 +448,520 @@ def bench_dotprod_32() -> List[int]:
     return a.assemble()
 
 
+# ============ Standard-like benchmarks ============
+
+def bench_dhrystone_lite(n_iter: int = 20) -> List[int]:
+    """Simplified Dhrystone: string compare/copy, struct copy, function calls,
+    enum-like branching, and integer ALU — the classic Dhrystone workload mix.
+    """
+    a = Asm()
+    SP = 2
+
+    a.li(SP, 0x3F00)
+
+    # --- init string1 @ 0x1000: "Hello, World!\0\0\0" ---
+    a.li(20, 0x1000)
+    a.li(21, 0x6C6C6548); a.sw(21, 20, 0)    # "Hell"
+    a.li(21, 0x57202C6F); a.sw(21, 20, 4)    # "o, W"
+    a.li(21, 0x646C726F); a.sw(21, 20, 8)    # "orld"
+    a.addi(21, 0, 0x21);  a.sw(21, 20, 12)   # "!\0\0\0"
+
+    # --- init string2 @ 0x1010: identical ---
+    a.li(20, 0x1010)
+    a.li(21, 0x6C6C6548); a.sw(21, 20, 0)
+    a.li(21, 0x57202C6F); a.sw(21, 20, 4)
+    a.li(21, 0x646C726F); a.sw(21, 20, 8)
+    a.addi(21, 0, 0x21);  a.sw(21, 20, 12)
+
+    # --- init string3 @ 0x1020: "Hello, Vorld!" (V vs W at byte 7) ---
+    a.li(20, 0x1020)
+    a.li(21, 0x6C6C6548); a.sw(21, 20, 0)
+    a.li(21, 0x56202C6F); a.sw(21, 20, 4)    # "o, V"
+    a.li(21, 0x646C726F); a.sw(21, 20, 8)
+    a.addi(21, 0, 0x21);  a.sw(21, 20, 12)
+
+    # --- init record1 @ 0x1040: 8 words ---
+    a.li(20, 0x1040)
+    for i in range(8):
+        a.li(21, ((i + 1) * 0x11111111) & 0xFFFFFFFF)
+        a.sw(21, 20, i * 4)
+
+    # --- main loop ---
+    a.addi(3, 0, n_iter)
+    a.addi(4, 0, 0)
+
+    a.label("dh_main")
+    a.beq(3, 0, "dh_done")
+
+    # 1. strcmp(str1, str2, 16) → 0
+    a.li(10, 0x1000); a.li(11, 0x1010); a.addi(12, 0, 16)
+    a.addi(SP, SP, -4); a.sw(1, SP, 0)
+    a.jal(1, "dh_strcmp")
+    a.lw(1, SP, 0); a.addi(SP, SP, 4)
+    a.add(4, 4, 10)
+
+    # 2. strcmp(str1, str3, 16) → nonzero
+    a.li(10, 0x1000); a.li(11, 0x1020); a.addi(12, 0, 16)
+    a.addi(SP, SP, -4); a.sw(1, SP, 0)
+    a.jal(1, "dh_strcmp")
+    a.lw(1, SP, 0); a.addi(SP, SP, 4)
+    a.add(4, 4, 10)
+
+    # 3. memcpy record1→record2 (8 words)
+    a.li(10, 0x1060); a.li(11, 0x1040); a.addi(12, 0, 8)
+    a.addi(SP, SP, -4); a.sw(1, SP, 0)
+    a.jal(1, "dh_mcpyw")
+    a.lw(1, SP, 0); a.addi(SP, SP, 4)
+
+    # 4. enum_proc
+    a.add(10, 3, 0)
+    a.addi(SP, SP, -4); a.sw(1, SP, 0)
+    a.jal(1, "dh_enum")
+    a.lw(1, SP, 0); a.addi(SP, SP, 4)
+    a.add(4, 4, 10)
+
+    # 5. int_compute
+    a.add(10, 3, 4)
+    a.addi(SP, SP, -4); a.sw(1, SP, 0)
+    a.jal(1, "dh_intcalc")
+    a.lw(1, SP, 0); a.addi(SP, SP, 4)
+    a.add(4, 4, 10)
+
+    a.addi(3, 3, -1)
+    a.j("dh_main")
+    a.label("dh_done")
+    a.j("dh_epi")
+
+    # === subroutines ===
+
+    # strcmp: [x10] vs [x11] for x12 bytes → x10 = 0 (equal) or diff
+    a.label("dh_strcmp")
+    a.label("dh_scl")
+    a.beq(12, 0, "dh_seq")
+    a.lbu(13, 10, 0)
+    a.lbu(14, 11, 0)
+    a.bne(13, 14, "dh_sneq")
+    a.addi(10, 10, 1)
+    a.addi(11, 11, 1)
+    a.addi(12, 12, -1)
+    a.j("dh_scl")
+    a.label("dh_seq")
+    a.addi(10, 0, 0)
+    a.ret()
+    a.label("dh_sneq")
+    a.sub(10, 13, 14)
+    a.ret()
+
+    # memcpy_w: copy x12 words from [x11] to [x10]
+    a.label("dh_mcpyw")
+    a.label("dh_mcl")
+    a.beq(12, 0, "dh_mcd")
+    a.lw(13, 11, 0)
+    a.sw(13, 10, 0)
+    a.addi(10, 10, 4)
+    a.addi(11, 11, 4)
+    a.addi(12, 12, -1)
+    a.j("dh_mcl")
+    a.label("dh_mcd")
+    a.ret()
+
+    # enum_proc: x10 mod 3 → switch
+    a.label("dh_enum")
+    a.addi(13, 0, 3)
+    a.label("dh_eml")
+    a.blt(10, 13, "dh_emd")
+    a.sub(10, 10, 13)
+    a.j("dh_eml")
+    a.label("dh_emd")
+    a.beq(10, 0, "dh_ec0")
+    a.addi(14, 0, 1)
+    a.beq(10, 14, "dh_ec1")
+    a.addi(10, 0, 42)
+    a.ret()
+    a.label("dh_ec0")
+    a.addi(10, 0, 7)
+    a.ret()
+    a.label("dh_ec1")
+    a.addi(10, 0, 19)
+    a.ret()
+
+    # int_compute: ALU-heavy
+    a.label("dh_intcalc")
+    a.slli(13, 10, 3)
+    a.add(13, 13, 10)
+    a.xori(14, 13, 0x55)
+    a.srai(15, 14, 2)
+    a.add(10, 14, 15)
+    a.andi(10, 10, 0xFF)
+    a.ret()
+
+    a.label("dh_epi")
+    append_epilogue(a)
+    return a.assemble()
+
+
+def bench_coremark_lite() -> List[int]:
+    """CoreMark-like: linked list build/traverse/search + state machine + CRC16."""
+    a = Asm()
+    NODE_BASE = 0x1000
+    INPUT_BASE = 0x1100
+    N_NODES = 16
+    N_INPUT = 32
+
+    # ---- Part 1: build linked list (16 nodes × 8 bytes: {next, value}) ----
+    a.li(20, NODE_BASE)
+    a.addi(5, 0, 0)
+    a.addi(6, 0, N_NODES)
+    a.addi(7, 0, N_NODES - 1)
+
+    a.label("cm_bld")
+    a.beq(5, 6, "cm_bld_done")
+    a.slli(8, 5, 3)
+    a.add(9, 20, 8)          # &node[i]
+    a.addi(10, 5, 1)
+    a.sw(10, 9, 4)            # value = i+1
+    a.beq(5, 7, "cm_last")
+    a.addi(11, 9, 8)
+    a.sw(11, 9, 0)            # next = &node[i+1]
+    a.j("cm_bld_next")
+    a.label("cm_last")
+    a.sw(0, 9, 0)             # next = NULL
+    a.label("cm_bld_next")
+    a.addi(5, 5, 1)
+    a.j("cm_bld")
+    a.label("cm_bld_done")
+
+    # traverse: sum all values
+    a.li(5, NODE_BASE)
+    a.addi(6, 0, 0)
+    a.label("cm_trav")
+    a.beq(5, 0, "cm_trav_done")
+    a.lw(7, 5, 4)
+    a.add(6, 6, 7)
+    a.lw(5, 5, 0)
+    a.j("cm_trav")
+    a.label("cm_trav_done")
+
+    # search: find value == 10
+    a.li(5, NODE_BASE)
+    a.addi(8, 0, 10)
+    a.addi(9, 0, 0)
+    a.label("cm_srch")
+    a.beq(5, 0, "cm_srch_done")
+    a.lw(7, 5, 4)
+    a.bne(7, 8, "cm_srch_next")
+    a.addi(9, 0, 1)
+    a.j("cm_srch_done")
+    a.label("cm_srch_next")
+    a.lw(5, 5, 0)
+    a.j("cm_srch")
+    a.label("cm_srch_done")
+    a.add(6, 6, 9)
+
+    # count nodes with value > 8
+    a.li(5, NODE_BASE)
+    a.addi(8, 0, 8)
+    a.addi(9, 0, 0)
+    a.label("cm_cnt")
+    a.beq(5, 0, "cm_cnt_done")
+    a.lw(7, 5, 4)
+    a.bge(8, 7, "cm_cnt_skip")   # threshold >= value → skip
+    a.addi(9, 9, 1)
+    a.label("cm_cnt_skip")
+    a.lw(5, 5, 0)
+    a.j("cm_cnt")
+    a.label("cm_cnt_done")
+    a.add(6, 6, 9)
+
+    # ---- Part 2: state machine (32 input bytes) ----
+    a.li(20, INPUT_BASE)
+    for i in range(8):
+        val = 0
+        for j in range(4):
+            b = ((i * 4 + j) * 7 + 3) & 0xFF
+            val |= b << (j * 8)
+        a.li(21, val)
+        a.sw(21, 20, i * 4)
+
+    a.addi(5, 0, 0)           # state
+    a.li(10, INPUT_BASE)
+    a.addi(11, 0, N_INPUT)
+    a.addi(15, 0, 0)          # transition count
+
+    a.label("cm_fsm")
+    a.beq(11, 0, "cm_fsm_done")
+    a.lbu(12, 10, 0)
+    a.andi(12, 12, 3)
+    a.add(13, 5, 12)
+    a.addi(13, 13, 1)
+    a.andi(5, 13, 3)
+    a.addi(15, 15, 1)
+    a.addi(10, 10, 1)
+    a.addi(11, 11, -1)
+    a.j("cm_fsm")
+    a.label("cm_fsm_done")
+    a.add(6, 6, 5)
+    a.add(6, 6, 15)
+
+    # ---- Part 3: CRC16-CCITT over 32 bytes ----
+    a.li(10, INPUT_BASE)
+    a.addi(11, 0, N_INPUT)
+    a.li(5, 0xFFFF)
+    a.li(8, 0x1021)
+    a.li(28, 0x8000)
+    a.li(29, 0xFFFF)
+
+    a.label("cm_crc_byte")
+    a.beq(11, 0, "cm_crc_done")
+    a.lbu(9, 10, 0)
+    a.slli(9, 9, 8)
+    a.xor_(5, 5, 9)
+    a.addi(12, 0, 8)
+
+    a.label("cm_crc_bit")
+    a.beq(12, 0, "cm_crc_nb")
+    a.and_(14, 5, 28)
+    a.slli(5, 5, 1)
+    a.beq(14, 0, "cm_crc_nx")
+    a.xor_(5, 5, 8)
+    a.label("cm_crc_nx")
+    a.and_(5, 5, 29)
+    a.addi(12, 12, -1)
+    a.j("cm_crc_bit")
+    a.label("cm_crc_nb")
+    a.addi(10, 10, 1)
+    a.addi(11, 11, -1)
+    a.j("cm_crc_byte")
+    a.label("cm_crc_done")
+    a.add(6, 6, 5)
+
+    append_epilogue(a)
+    return a.assemble()
+
+
+def bench_sieve_256() -> List[int]:
+    """Sieve of Eratosthenes: find all primes up to 256."""
+    a = Asm()
+    BASE = 0x1000
+    N = 256
+
+    # init: all bytes = 1
+    a.li(20, BASE)
+    a.addi(5, 0, 0)
+    a.li(6, N)
+    a.addi(7, 0, 1)
+    a.label("sv_init")
+    a.beq(5, 6, "sv_init_done")
+    a.sb(7, 20, 0)
+    a.addi(20, 20, 1)
+    a.addi(5, 5, 1)
+    a.j("sv_init")
+    a.label("sv_init_done")
+
+    # mark 0, 1 as not prime
+    a.li(20, BASE)
+    a.sb(0, 20, 0)
+    a.sb(0, 20, 1)
+
+    # sieve
+    a.li(30, BASE)
+    a.addi(5, 0, 2)
+    a.addi(6, 0, 16)          # sqrt(256)
+    a.li(28, N)
+
+    a.label("sv_outer")
+    a.bge(5, 6, "sv_outer_done")
+    a.add(20, 30, 5)
+    a.lbu(21, 20, 0)
+    a.beq(21, 0, "sv_skip")
+    a.add(7, 5, 5)             # j = 2*i
+
+    a.label("sv_inner")
+    a.bge(7, 28, "sv_inner_done")
+    a.add(20, 30, 7)
+    a.sb(0, 20, 0)
+    a.add(7, 7, 5)
+    a.j("sv_inner")
+    a.label("sv_inner_done")
+
+    a.label("sv_skip")
+    a.addi(5, 5, 1)
+    a.j("sv_outer")
+    a.label("sv_outer_done")
+
+    # count primes
+    a.addi(5, 0, 0)
+    a.addi(8, 0, 2)
+    a.label("sv_count")
+    a.bge(8, 28, "sv_count_done")
+    a.add(20, 30, 8)
+    a.lbu(21, 20, 0)
+    a.beq(21, 0, "sv_cnt_skip")
+    a.addi(5, 5, 1)
+    a.label("sv_cnt_skip")
+    a.addi(8, 8, 1)
+    a.j("sv_count")
+    a.label("sv_count_done")
+
+    append_epilogue(a)
+    return a.assemble()
+
+
+def bench_qsort_32() -> List[int]:
+    """Iterative quicksort of 32 integers (Lomuto partition, explicit stack)."""
+    a = Asm()
+    ARR_BASE = 0x1000
+    STK_BASE = 0x1200
+    N = 32
+
+    a.li(30, ARR_BASE)
+
+    # init: reverse sorted [31, 30, ..., 0]
+    a.addi(5, 0, 0)
+    a.addi(6, 0, N)
+    a.addi(7, 0, N - 1)
+    a.label("qs_init")
+    a.beq(5, 6, "qs_init_done")
+    a.slli(8, 5, 2)
+    a.add(8, 30, 8)
+    a.sw(7, 8, 0)
+    a.addi(5, 5, 1)
+    a.addi(7, 7, -1)
+    a.j("qs_init")
+    a.label("qs_init_done")
+
+    # push (0, N-1)
+    a.li(2, STK_BASE)
+    a.sw(0, 2, 0)
+    a.addi(5, 0, N - 1)
+    a.sw(5, 2, 4)
+    a.addi(2, 2, 8)
+
+    a.label("qs_loop")
+    a.li(20, STK_BASE)
+    a.beq(2, 20, "qs_done")
+
+    a.addi(2, 2, -8)
+    a.lw(3, 2, 0)             # lo
+    a.lw(4, 2, 4)             # hi
+    a.bge(3, 4, "qs_loop")
+
+    # partition: pivot = arr[hi]
+    a.slli(8, 4, 2)
+    a.add(8, 30, 8)
+    a.lw(5, 8, 0)             # pivot
+
+    a.addi(6, 3, -1)          # i = lo - 1
+    a.add(7, 3, 0)            # j = lo
+
+    a.label("qs_part")
+    a.bge(7, 4, "qs_part_done")
+    a.slli(8, 7, 2)
+    a.add(8, 30, 8)
+    a.lw(9, 8, 0)             # arr[j]
+    a.blt(5, 9, "qs_part_skip")   # pivot < arr[j] → skip
+
+    # i++; swap arr[i], arr[j]
+    a.addi(6, 6, 1)
+    a.slli(10, 6, 2)
+    a.add(10, 30, 10)
+    a.lw(11, 10, 0)           # arr[i]
+    a.sw(9, 10, 0)            # arr[i] = arr[j]
+    a.sw(11, 8, 0)            # arr[j] = old arr[i]
+
+    a.label("qs_part_skip")
+    a.addi(7, 7, 1)
+    a.j("qs_part")
+    a.label("qs_part_done")
+
+    # swap arr[i+1] and arr[hi]
+    a.addi(12, 6, 1)          # pivot_pos
+    a.slli(10, 12, 2)
+    a.add(10, 30, 10)
+    a.lw(11, 10, 0)
+    a.slli(13, 4, 2)
+    a.add(13, 30, 13)
+    a.lw(14, 13, 0)
+    a.sw(14, 10, 0)
+    a.sw(11, 13, 0)
+
+    # push right (pivot_pos+1, hi), then left (lo, pivot_pos-1)
+    a.addi(15, 12, 1)
+    a.sw(15, 2, 0)
+    a.sw(4, 2, 4)
+    a.addi(2, 2, 8)
+
+    a.addi(16, 12, -1)
+    a.sw(3, 2, 0)
+    a.sw(16, 2, 4)
+    a.addi(2, 2, 8)
+
+    a.j("qs_loop")
+    a.label("qs_done")
+
+    append_epilogue(a)
+    return a.assemble()
+
+
+def bench_lfsr_256() -> List[int]:
+    """Galois LFSR (16-bit) for 256 steps — heavy shifts & XOR."""
+    a = Asm()
+
+    a.li(5, 0xACE1)           # seed
+    a.li(6, 0xB400)           # taps
+    a.li(28, 0xFFFF)          # mask
+    a.addi(7, 0, 0)           # accumulator
+    a.addi(8, 0, 0)           # i
+    a.li(9, 256)              # N
+
+    a.label("lfsr_loop")
+    a.beq(8, 9, "lfsr_done")
+
+    a.andi(10, 5, 1)          # lsb
+    a.sub(11, 0, 10)          # -lsb (0 or 0xFFFFFFFF)
+    a.and_(11, 11, 6)         # feedback
+    a.srli(5, 5, 1)
+    a.xor_(5, 5, 11)
+    a.and_(5, 5, 28)          # keep 16 bits
+
+    a.xor_(7, 7, 5)
+
+    a.addi(8, 8, 1)
+    a.j("lfsr_loop")
+    a.label("lfsr_done")
+
+    append_epilogue(a)
+    return a.assemble()
+
+
+def bench_hello_uart() -> List[int]:
+    """Hello World via MMIO UART — prints 'Hello, CPU!\\n' then PASS."""
+    a = Asm()
+    msg = "Hello, CPU!\n"
+
+    # Store message string at 0x1000
+    a.li(20, 0x1000)
+    # Pack string into words (little-endian)
+    msg_bytes = msg.encode("ascii") + b"\x00"
+    # Pad to word boundary
+    while len(msg_bytes) % 4 != 0:
+        msg_bytes += b"\x00"
+    for i in range(0, len(msg_bytes), 4):
+        w = (msg_bytes[i]
+             | (msg_bytes[i+1] << 8)
+             | (msg_bytes[i+2] << 16)
+             | (msg_bytes[i+3] << 24))
+        a.li(21, w)
+        a.sw(21, 20, i)
+
+    # Print via puts helper
+    a.li(10, 0x1000)
+    a.puts(10)
+
+    append_epilogue(a)
+    return a.assemble()
+
+
 BENCHMARKS: Dict[str, Callable[[], List[int]]] = {
     "fib_20":          lambda: bench_fib(20),
     "sum_1_to_100":    lambda: bench_sum_1_to_n(100),
@@ -458,6 +972,12 @@ BENCHMARKS: Dict[str, Callable[[], List[int]]] = {
     "crc32_64b":       bench_crc32_64b,
     "bsearch_64":      bench_bsearch_64,
     "dotprod_32":      bench_dotprod_32,
+    "dhrystone_lite":  lambda: bench_dhrystone_lite(20),
+    "coremark_lite":   bench_coremark_lite,
+    "sieve_256":       bench_sieve_256,
+    "qsort_32":        bench_qsort_32,
+    "lfsr_256":        bench_lfsr_256,
+    "hello_uart":      bench_hello_uart,
 }
 
 

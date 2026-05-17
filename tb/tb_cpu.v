@@ -26,6 +26,8 @@ module tb_cpu;
     wire [31:0] dbg_pc, dbg_instr_wb, dbg_wb_data;
     wire        dbg_wb_we;
     wire [4:0]  dbg_wb_rd;
+    wire        uart_tx_valid;
+    wire [7:0]  uart_tx_data;
 
     cpu_top u_dut (
         .clk          (clk),
@@ -34,8 +36,17 @@ module tb_cpu;
         .dbg_instr_wb (dbg_instr_wb),
         .dbg_wb_we    (dbg_wb_we),
         .dbg_wb_rd    (dbg_wb_rd),
-        .dbg_wb_data  (dbg_wb_data)
+        .dbg_wb_data  (dbg_wb_data),
+        .uart_tx_valid(uart_tx_valid),
+        .uart_tx_data (uart_tx_data)
     );
+
+    // ---- UART 输出捕获 ----
+    always @(posedge clk) begin
+        if (uart_tx_valid) begin
+            $write("%c", uart_tx_data);
+        end
+    end
 
     // 复位 + 仿真
     integer cycles = 0;

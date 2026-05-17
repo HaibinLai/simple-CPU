@@ -55,6 +55,12 @@
 `define MEM_H         3'd1  // funct3 = 001 / 101
 `define MEM_W         3'd2  // funct3 = 010
 
+// ---------- MMIO 地址 ----------
+`define UART_TX_ADDR  32'h1000_0000   // 写：发送一个字节
+`define UART_ST_ADDR  32'h1000_0004   // 读：bit0 = TX ready (always 1)
+`define MMIO_BASE     32'h1000_0000
+`define MMIO_END      32'h1000_0008   // [BASE, END)
+
 // ---------- ALU 源选择 ----------
 `define ASRC_RS1      1'b0
 `define ASRC_PC       1'b1

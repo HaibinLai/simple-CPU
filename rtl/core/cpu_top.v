@@ -28,7 +28,11 @@ module cpu_top (
     output wire [31:0] dbg_instr_wb,
     output wire        dbg_wb_we,
     output wire [4:0]  dbg_wb_rd,
-    output wire [31:0] dbg_wb_data
+    output wire [31:0] dbg_wb_data,
+
+    // MMIO UART 输出
+    output reg         uart_tx_valid,
+    output reg  [7:0]  uart_tx_data
 );
 
     // ===== \u6240\u6709\u6d41\u6c34\u7ebf\u5bc4\u5b58\u5668\u524d\u7f6e\u58f0\u660e\uff08Icarus \u4e0d\u5141\u8bb8\u524d\u5411\u5f15\u7528 reg\uff09=====
@@ -1353,10 +1357,30 @@ module cpu_top (
             default: ;
         endcase
     end
+    // ---- MMIO 地址解码 ----
+    wire mmio_hit = (agu_mem_alu_y >= `MMIO_BASE) && (agu_mem_alu_y < `MMIO_END);
+    wire dmem_we  = agu_mem_mem_write & agu_mem_valid & ~mmio_hit;
+
+    // MMIO 读数据（UART status: bit0 = TX ready, always 1）
+    wire [31:0] mmio_rdata = (agu_mem_alu_y == `UART_ST_ADDR) ? 32'h0000_0001 : 32'h0;
+
+    // UART TX: 当 MEM 阶段写入 UART_TX_ADDR 时输出字节
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            uart_tx_valid <= 1'b0;
+            uart_tx_data  <= 8'h0;
+        end else if (agu_mem_mem_write && agu_mem_valid && agu_mem_alu_y == `UART_TX_ADDR) begin
+            uart_tx_valid <= 1'b1;
+            uart_tx_data  <= mem_wdata_aligned[7:0];
+        end else begin
+            uart_tx_valid <= 1'b0;
+        end
+    end
+
     dmem u_dmem (
         .clk    (clk),
         .addr   (agu_mem_alu_y),
-        .we     (agu_mem_mem_write & agu_mem_valid),
+        .we     (dmem_we),
         .be     (dmem_be_a),
         .wdata  (mem_wdata_aligned),
         .rdata  (dmem_rdata),
@@ -1369,39 +1393,42 @@ module cpu_top (
         .rdata_b(dmem_rdata_b)
     );
 
+    // MMIO/DMEM 读数据选择
+    wire [31:0] mem_rdata_mux = mmio_hit ? mmio_rdata : dmem_rdata;
+
     // load 数据按宽度/符号扩展
     always @(*) begin
         case (agu_mem_mem_funct3)
             3'b000: begin // LB
                 case (mem_byte_off)
-                    2'd0: mem_load_data = {{24{dmem_rdata[7]}},  dmem_rdata[7:0]};
-                    2'd1: mem_load_data = {{24{dmem_rdata[15]}}, dmem_rdata[15:8]};
-                    2'd2: mem_load_data = {{24{dmem_rdata[23]}}, dmem_rdata[23:16]};
-                    2'd3: mem_load_data = {{24{dmem_rdata[31]}}, dmem_rdata[31:24]};
+                    2'd0: mem_load_data = {{24{mem_rdata_mux[7]}},  mem_rdata_mux[7:0]};
+                    2'd1: mem_load_data = {{24{mem_rdata_mux[15]}}, mem_rdata_mux[15:8]};
+                    2'd2: mem_load_data = {{24{mem_rdata_mux[23]}}, mem_rdata_mux[23:16]};
+                    2'd3: mem_load_data = {{24{mem_rdata_mux[31]}}, mem_rdata_mux[31:24]};
                 endcase
             end
             3'b001: begin // LH
                 if (mem_byte_off == 2'd0)
-                    mem_load_data = {{16{dmem_rdata[15]}}, dmem_rdata[15:0]};
+                    mem_load_data = {{16{mem_rdata_mux[15]}}, mem_rdata_mux[15:0]};
                 else
-                    mem_load_data = {{16{dmem_rdata[31]}}, dmem_rdata[31:16]};
+                    mem_load_data = {{16{mem_rdata_mux[31]}}, mem_rdata_mux[31:16]};
             end
-            3'b010: mem_load_data = dmem_rdata; // LW
+            3'b010: mem_load_data = mem_rdata_mux; // LW
             3'b100: begin // LBU
                 case (mem_byte_off)
-                    2'd0: mem_load_data = {24'b0, dmem_rdata[7:0]};
-                    2'd1: mem_load_data = {24'b0, dmem_rdata[15:8]};
-                    2'd2: mem_load_data = {24'b0, dmem_rdata[23:16]};
-                    2'd3: mem_load_data = {24'b0, dmem_rdata[31:24]};
+                    2'd0: mem_load_data = {24'b0, mem_rdata_mux[7:0]};
+                    2'd1: mem_load_data = {24'b0, mem_rdata_mux[15:8]};
+                    2'd2: mem_load_data = {24'b0, mem_rdata_mux[23:16]};
+                    2'd3: mem_load_data = {24'b0, mem_rdata_mux[31:24]};
                 endcase
             end
             3'b101: begin // LHU
                 if (mem_byte_off == 2'd0)
-                    mem_load_data = {16'b0, dmem_rdata[15:0]};
+                    mem_load_data = {16'b0, mem_rdata_mux[15:0]};
                 else
-                    mem_load_data = {16'b0, dmem_rdata[31:16]};
+                    mem_load_data = {16'b0, mem_rdata_mux[31:16]};
             end
-            default: mem_load_data = dmem_rdata;
+            default: mem_load_data = mem_rdata_mux;
         endcase
     end
 
