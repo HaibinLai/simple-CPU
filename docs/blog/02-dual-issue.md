@@ -1,308 +1,114 @@
-# 从零开始造一颗 RISC-V CPU（二）：双发射设计 — IFQ、配对规则与性能分析
+# 从零开始造一颗 RISC-V CPU（二）：顺序双发射（In-Order Dual-Issue）基线架构与冒险黑洞
 
-> 系列博客第 2 篇 —— 深入双发射（dual-issue）的实现：指令取指队列 IFQ、slot0/slot1 配对条件、pair-block 原因分析，以及实测性能数据。
-
----
-
-## 为什么要双发射？
-
-单发射 CPU 的 IPC（Instructions Per Cycle）上限是 **1.0**——每个时钟周期最多完成一条指令。要突破这个天花板，最直接的方法是**每周期发射多条指令**。
-
-双发射（2-wide issue）的理论 IPC 上限是 2.0，但实际受制于数据依赖、指令类型限制等因素，很难达到理论值。我们的目标是在**不引入过多复杂度**的前提下，尽可能提高实际 IPC。
-
-核心思路是在 ID2（译码）阶段同时从 IFQ 弹出两条指令，分别送入两个执行通道：
-
-```
-                         ┌─ slot0: EX1 → EX2 → AGU → MEM → WB   (全功能，5 级)
- IF → ID1 → ID2(decode) ┤
-                         └─ slot1: EX1b → WB                     (轻量，1 级)
-```
-
-- **Slot0**（主通道）：支持所有指令类型——ALU、load、store、branch、jump
-- **Slot1**（辅助通道）：仅支持 ALU、load、store、branch
+> 系列博客第 2 篇 —— 这是一个非常有意思的工程伏笔：为什么我们最终走向了“乱序执行（OoO）”？本文将解剖我们的基线版本（main 分支）—— 顺序双发射（In-Order Dual-Issue）架构。我们将看看在这套初代架构中，为了保证两条指令同时无碰撞地在深浅管线中平行飞奔，前端译码器（ID）必须设置多少道保守而沉重的“安检门”（Hazard Checks），并分析它们是如何将 IPC 锁死在天花板下的。
 
 ---
 
-## IFQ：指令取指队列
+## 1. 突破标量极限：超标量与非对称流水线
 
-双发射的前提是 ID2 阶段能**同时看到两条指令**。如果 IF 每周期只取一条指令，双发射率会被前端带宽限制。IFQ（Instruction Fetch Queue）解决这个问题——它在 IF 和 ID 之间插入一个 FIFO 缓冲区，允许 IF 预取的指令在队列中积累。
+在一个传统的单发射（Single-Issue）标量 CPU 中，即使流水线没有停顿，它的终极 IPC（Instruction Per Cycle）也被物理焊死在 1.0 的天花板上。为了打破这堵墙，我们在最初的基线架构中引入了**超标量（Superscalar）顺序双发射**设计。
 
-### 基本参数
+出于对 FPGA 面积和布线连通性的考量，我们没有做绝对的对称管线，而是设计了一条**非对称双发射流水线**：
 
-| 参数 | 值 |
-|------|---|
-| 深度 | 8 entry（可配置，实际设为 8） |
-| Push 带宽 | 每周期最多 2 条 |
-| Pop 带宽 | 每周期最多 2 条（slot0 + slot1） |
-| Entry 内容 | PC(32b) + 指令字(32b) + pred_taken(1b) + pred_target(32b) + pred_ghr(32b) |
-
-### FIFO 实现
-
-IFQ 本质上是一个**环形缓冲区**，用 head/tail 指针和计数器管理：
-
-```verilog
-reg [AW-1:0] head_ptr;    // 读指针（指向最老的指令）
-reg [AW-1:0] tail_ptr;    // 写指针（指向下一个空位）
-reg [AW:0]   cnt;         // 当前条目数，0..DEPTH
+```mermaid
+graph TD
+    subgraph Front-End [指令拾取前端]
+        IF[IF: 取指阶段] --> |最多并入 2-Instruction| IFQ[(IFQ: 8-Entry 指令队列)]
+    end
+    
+    subgraph Decode-Dispatch [译码与发射层 - InOrder 时代的梦魇]
+        IFQ --> |双路流出| ID[ID2: 双发解码器]
+        ID --> HZ{发射仲裁栅栏<br>静态检查 6 项冒险}
+    end
+    
+    subgraph Execution-Back-End [非对称双执行通道]
+        HZ -->|Slot 0 刚性派发| S0_EX[EX1]
+        S0_EX --> S0_EX2[EX2] --> S0_AGU[AGU 算址] --> S0_MEM[MEM 访存] --> S0_WB[WB 写回]
+        
+        HZ -->|Slot 1 弹性派发| S1_EX[EX1b 轻量级 ALU]
+        S1_EX -->|单周期直达| S1_WB[WB 写回]
+    end
 ```
 
-**Push 逻辑**（IF 阶段向 IFQ 写入）：
-
-```verilog
-// push_1 依赖 push_0 成功（串行准入）
-wire actual_push_0 = push_valid_0 && (空间足够);
-wire actual_push_1 = push_valid_1 && actual_push_0 && (还有第二个空位);
-wire do_push_0 = !flush && actual_push_0;
-wire do_push_1 = !flush && actual_push_1;
-```
-
-注意 push_1 **依赖 push_0 成功**——这保证了指令的程序序。如果 push_0 因为队列满而失败，push_1 也不会入队。
-
-**Pop 逻辑**（ID2 阶段从 IFQ 读取）：
-
-```verilog
-wire do_pop_0 = !flush && pop && head_valid;      // slot0 弹出队首
-wire do_pop_1 = !flush && pop2 && head2_valid;     // slot1 弹出队首+1
-```
-
-- `head_valid` = 队列非空且队首有效
-- `head2_valid` = 队列至少 2 条且第二条有效
-
-**指针更新**（单周期完成所有增减）：
-
-```verilog
-head_ptr <= head_ptr + do_pop_0 + do_pop_1;
-tail_ptr <= tail_ptr + do_push_0 + do_push_1;
-cnt      <= cnt + do_push_0 + do_push_1 - do_pop_0 - do_pop_1;
-```
-
-### 反压机制
-
-当 IFQ 快满时，需要通知 IF 阶段减速或暂停：
-
-| 信号 | 条件 | 效果 |
-|------|------|------|
-| `almost_full` | `cnt >= DEPTH - 1` | IF 最多只能 push 1 条 |
-| `full` | `cnt == DEPTH` | IF 完全 stall，不发射任何指令 |
-
-### Flush
-
-分支 misprediction 或异常时，IFQ 需要立即清空所有 speculative 指令：
-
-```verilog
-if (flush) begin
-    head_ptr <= 0;
-    tail_ptr <= 0;
-    cnt      <= 0;
-    for (i = 0; i < DEPTH; i++)
-        valid_q[i] <= 0;
-end
-```
-
-一次性归零，下一周期 IF 从正确的 PC 重新开始填充。
+- **Slot 0（主干道）**：全功能重型流水线，深达 5 级执行段，能够抗住最重的 Load/Store/Branch/ALU 以及长计算指令。
+- **Slot 1（辅通道）**：极轻量的 1 周期微管线，专职吸收纯 ALU 计算，起到“拾遗补漏”、榨取指令级并行度（ILP）的作用。
 
 ---
 
-## 配对规则：slot1 什么时候能发射？
+## 2. 顺序架构下的“封锁线”：六大静态冒险栅栏 (Hazard Checking)
 
-双发射的核心难题是**判断两条相邻指令能否安全地同时执行**。在 ID2 阶段，agent 实现了 6 项检查，全部通过才允许 slot1 发射：
+因为在这个基线版本中，**指令必须按顺序（In-Order）派发、执行并写入物理寄存器**，我们没有任何能够缓存“半成品”的保留站（RS）或推迟写入的重排序缓冲（ROB）。
+
+能否把两条指令平行抛入 Slot 0 和 Slot 1，完全依赖于在 ID2 阶段用纯组合逻辑进行瞬间安检。我们布设了 6 重严密的阻塞逻辑，只要触发任意一项，Slot 1 的指令就会被拦停（Stall）：
 
 ```verilog
-assign id2_issue_slot1 = id1_id2_valid1          // IFQ 有第二条指令
-    && id1_is_pairable                            // 指令类型可配对
-    && id_slot0_safe_for_pair                     // slot0 安全（恒 true）
-    && id1_no_raw_hazard                          // 无 RAW 依赖
-    && id1_no_waw_hazard                          // 无 WAW 冲突
-    && id1_no_load_use_hazard                     // 无 load-use
-    && id1_no_xcycle_waw                          // 无跨周期 WAW
-    && id1_no_store_alias_hazard;                 // 无 store alias
+assign id2_issue_slot1 = id1_id2_valid1          // 1. IFQ 里是否管载了第二发指令
+    && id1_is_pairable                           // 2. 指令类型兼容性 (仅轻量指令可放行)
+    && id_slot0_safe_for_pair                    // 3. Slot 0 主令的安全余量
+    && id1_no_raw_hazard                         // 4. 禁止静态 RAW 真数据依赖
+    && id1_no_waw_hazard                         // 5. 禁止同周期 WAW 写冲突
+    && id1_no_load_use_hazard                    // 6. 禁止深管线 Load-Use 惩罚
+    && id1_no_xcycle_waw;                        // 7. 防微杜渐：跨周期 WAW 踩踏
 ```
 
-### Check 1：指令类型（is_pairable）
+### 2.1 铁壁：RAW (读后写) 真依赖阻塞
+在顺序架构里，如果后一条指令依赖前一条指令（如 `a = 1; b = a + 2`）。如果 Slot 0 在算 `a`，Slot 1 绝不能在**同一个时钟周期**去读取 `a`，否则读到的绝对是脏数据。因为缺少动态调度，ID 级一旦发现，只能直接拦住 Slot 1，浪费那一拍。
 
 ```verilog
-wire id1_is_pairable = (id1_opcode == `OP_REG)    // R-type ALU
-                     || (id1_opcode == `OP_IMM)    // I-type ALU
-                     || (id1_opcode == `OP_LUI)    // LUI
-                     || (id1_opcode == `OP_AUIPC)  // AUIPC
-                     || (id1_opcode == `OP_BRANCH)  // 条件分支
-                     || (id1_opcode == `OP_LOAD)    // Load
-                     || (id1_opcode == `OP_STORE);  // Store
-```
-
-**不可配对的指令**：JAL、JALR、ECALL、MRET——这些涉及控制流跳转或特权操作，只能走 slot0 主通道。
-
-### Check 2：RAW 依赖
-
-如果 slot0 的目标寄存器（rd）是 slot1 的源操作数（rs1 或 rs2），两条指令不能同时发射：
-
-```verilog
+// RAW 仲裁栅栏：Slot 1 绝对禁止读取 Slot 0 当前正在写入的目标寄存器
 wire id1_no_raw_hazard = ~(
     id_reg_write && (id_rd != 5'd0) && (
-        (slot1_rs1_used && id1_rs1 == id_rd) ||
-        (slot1_rs2_used && id1_rs2 == id_rd)
+        (slot1_rs1_used && id1_rs1 == id_rd) || // S1 要读的 rs1 撞了 S0 的 rd
+        (slot1_rs2_used && id1_rs2 == id_rd)    // S1 要读的 rs2 撞了 S0 的 rd
     )
 );
 ```
 
-例如：
-```
-ADD x1, x2, x3     # slot0: 写 x1
-SUB x4, x1, x5     # slot1: 读 x1 ← 依赖 slot0，不能配对！
-```
+### 2.2 畸形的深水区：跨周期 WAW (写后写)
+更折磨人的是，因为我们的管线是深浅不一的（Slot 0 有 5 级，Slot 1 只有 1 级）。
+如果 Slot 0 派发了一条需要 5 个周期才写回的 `LW x1, (x2)`，而下一个周期的 Slot 1 又派发了一条只要 1 个周期就写回的 `ADD x1, x3, x4`…… **后执行的指令反而提前把结果写回了寄存器，等前者回来时会把最新值强行覆盖导致破坏（WAW 回滚错误）！**
 
-### Check 3：WAW 冲突
-
-两条指令写同一个目标寄存器：
-
-```
-ADD x1, x2, x3     # slot0: 写 x1
-OR  x1, x4, x5     # slot1: 也写 x1 ← WAW 冲突！
-```
-
-### Check 4：Load-Use（4 级深度）
-
-slot1 的源操作数不能依赖任何 **正在流水线中飞行的 load 指令**——因为 load 的数据在 MEM 阶段才可用，无法前递到同周期的 slot1。
-
-这个检查覆盖了 4 个流水线级：ID/EX、EX/EX2、EX2/AGU、AGU/MEM：
-
-```verilog
-assign id1_no_load_use_hazard = ~(
-    (id_ex_mem_read  && ... && rd matches slot1 rs) ||
-    (ex_mem_mem_read && ... && rd matches slot1 rs) ||
-    (ex2_agu_mem_read && ... && rd matches slot1 rs) ||
-    (agu_mem_mem_read && ... && rd matches slot1 rs)
-);
-```
-
-### Check 5：Cross-Cycle WAW（5 级深度）
-
-slot1 的 rd 不能与任何正在飞行的指令的 rd 相同——否则写回时会产生冲突。检查覆盖 5 级：
-
-```verilog
-assign id1_no_xcycle_waw = ~(
-    id1_reg_write && (id1_rd != 5'd0) && (
-        (id_ex_valid   && id_ex_reg_write   && id_ex_rd   == id1_rd) ||
-        (ex_mem_valid  && ex_mem_reg_write  && ex_mem_rd  == id1_rd) ||
-        (ex2_agu_valid && ex2_agu_reg_write && ex2_agu_rd == id1_rd) ||
-        (agu_mem_valid && agu_mem_reg_write && agu_mem_rd == id1_rd) ||
-        (mem_wb_valid  && mem_wb_reg_write  && mem_wb_rd  == id1_rd)
-    )
-);
-```
-
-### Check 6：Store Alias
-
-防止 load 和 store 之间的地址冲突（store 还未计算出地址时，load 不能提前执行）。
+在没有 Register Renaming 消除名字依赖的年代，我们只能写出极其痛苦的**5级纵深跨拍探针 (Cross-Cycle WAW)**进行静态干预：如果前面管线的阴影里还在飞行企图写 `x1` 的指令，后方的指令全部被死死阻塞在前端！
 
 ---
 
-## Slot1 执行路径：1-Cycle Shortcut
+## 3. 非对称引擎的前递网络 (Bypass Network)
 
-Slot0 走完整的 5 级流水线（EX1 → EX2 → AGU → MEM → WB），而 slot1 走一条**捷径**——只需 1 个周期就完成执行并写回：
-
-```
-Slot1: ID2 → EX1b → WB
-```
-
-EX1b 阶段有独立的 ALU 实例，执行 slot1 的 ALU 运算。写回时通过独立的 PRF 写端口完成，不与 slot0 争抢。
-
-### Slot1 的前递网络
-
-Slot1 也有完整的前递支持（ptag-based，5 级优先级），从 slot0 同周期结果到 MEM/WB 阶段都能前递：
+对于非对称的双发架构，为了减轻 RAW 造成的致命 Stall，旁路网络必须变得异乎寻常的复杂。
+Slot 1 的前递来源不仅包含在上一拍刚刚算完的 EX1，还必须生连硬拽地跨接主流水线上的 EX2, AGU, MEM，甚至 WB 边缘。
 
 ```verilog
+// 恐怖的多级前递引脚，为 Slot 1 供血
 wire [31:0] slot1_rs1_fwd =
-    match(id_ex_rd_ptag)   ? ex_alu_y :        // slot0 同周期
-    match(ex_mem_rd_ptag)  ? ex_mem_alu_y :     // EX2
-    match(ex2_agu_rd_ptag) ? ex2_agu_alu_y :    // AGU
-    match(agu_mem_rd_ptag) ? agu_mem_fwd_data : // MEM
-    match(mem_wb_rd_ptag)  ? wb_data :          // WB
-                             slot1_rs1_base;    // PRF 原始值
+    match_s0_rd            ? ex_alu_y :         // Slot0 在上一级算完的血热数据
+    match(ex_mem_rd_ptag)  ? ex_mem_alu_y :     // EX2 级算完的数据
+    match(ex2_agu_rd_ptag) ? ex2_agu_alu_y :    // AGU 级截停
+    match(agu_mem_rd_ptag) ? agu_mem_fwd_data : // MEM 阶段数据提取
+    match(mem_wb_rd_ptag)  ? wb_data :          // WB 回写的边缘
+                             slot1_rs1_base;    // 没有命中活跃指令数据，规矩地读 PRF
 ```
 
-### Slot1 分支处理
-
-Slot1 支持条件分支指令，但采用**隐式 predict not-taken** 策略（不查 BPU）。如果 slot1 的分支实际 taken，就触发 misprediction flush。
-
-Redirect 优先级：**slot0 > slot1**。如果 slot0 本身也在 redirect，slot1 的结果会被 gate 掉。
-
 ---
 
-## Pair-Block 分析：为什么不能双发射？
+## 4. 走向乱序（OoO）的导火索：双发射阻力实测
 
-双发射率不是 100%，原因就是各种配对检查未通过。Testbench 对每个单发射周期进行归因，按**互斥优先级**分类：
+这就是全部了吗？理论很完美，但当程序跑起来时满屏幕都是血淋淋的教训。我们在基线 `main` 分支进行了基于归因截点的 Testbench 监控，得出了一组令人深思的数据：
 
-```verilog
-if (dut_pop0 && !dut_pop1) begin          // slot0 发射了，slot1 没有
-    if      (!dut_id1_valid1)   → novalid1  // IFQ 没第二条指令
-    else if (!dut_slot0_safe)   → unsafe0   // slot0 不安全（已废弃）
-    else if (!dut_id1_alu_only) → notalu    // 指令类型不可配对
-    else if (!dut_id1_no_raw)   → raw       // RAW 依赖
-    else if (!dut_id1_no_waw)   → waw       // WAW 冲突
-    else if (!dut_id1_no_lu)    → loaduse   // load-use
-    else if (!dut_id1_no_xwaw)  → xcycwaw   // 跨周期 WAW
-end
-```
+| 汇编应用形态 | In-Order 双发率 (Dual%) | 最致命的阻塞原因 (Stall Root Cause) | 工程深层分析 |
+|-------------|------------------|----------------|-----------|
+| **memcpy_64w** (数组拷贝)| **73%** | **RAW 绝对真依赖 (90%)** | 后一条 `SW *(A) = reg` 必须死死等待前一条 `LW` 传出 `reg`。在顺序管线下，这种数据流阻塞无法化解。 |
+| **fib_20** (状态复用迭代)| **50% 跌落** | **xWAW 跨拍冲突 (89%)** | 斐波那契 `a=b; b=a+b;`，所有变量都绑死在 3 个物理寄存器上。由于**名字冲突**，管线天天触发跨拍 WAW 安检，强行退化成了极度残废的单发射。 |
 
-### 实测数据解读
+**为什么我们在后续分支全面转向乱序执行（Out-of-Order）？**
 
-以 main 分支的 benchmark 数据为例：
+在静态的 In-Order 架构下，一旦编译器或指令集吐出了大量在微观上高度数据耦合或寄存器重名的片段（例如 `fib_20`），流水线在 ID 级就会遭遇大量的 RAW 等待和 WAW 限流。由于它是**“顺序解析并阻塞”**的，一颗有毒的指令卡住了，后续所有即使是无关的数据也动弹不得！
 
-| Benchmark | dual% | 主要阻挡因素 | 分析 |
-|-----------|------:|-------------|------|
-| **memcpy_64w** | 73% | RAW 90% | LW/SW 交替，天然配对良好；RAW 主要是 SW 依赖前一条 LW 的寄存器 |
-| **popcount_64** | 69% | RAW 74% | 内层循环有紧密的数据依赖链 |
-| **fib_20** | 50% | xWAW 89% | `a=b; b=a+b` 模式导致大量跨周期 WAW |
-| **bsort_16** | 41% | RAW 42%, nta 42% | 比较-交换模式中 LW 后紧跟 BLT 造成 RAW |
-| **sum_1_to_100** | 34% | nta 50%, xWAW 48% | 循环体短，branch 占比高 |
+我们通过实验证明：**物理拓扑带来的极限不是瓶颈，寄存器名字假依赖和静态死等才是。**
+为了把双发射这条“八车道高速公路”完全榨干跑满，微架构必须剥离掉这种僵硬的拦截！
 
-几个关键观察：
+在理解了顺序双发射极度痛苦的并发屏障后，在系列第 5 篇中，你将看到我们在 `feature/ooo` 分支引入了具有跨时代意义的 **寄存器重命名（Register Renaming）和保留站（RS/Tomasulo）**。届时，xWAW 将在硬件换名下土崩瓦解，那些在静态被拦截的指令都可以乱跳进 RS 里蓄势待发，IPC(每周期指令数) 将在《Fibonacci》测试中彻底打爆标量极限，飙到恐怖的 **1.54**！
 
-1. **RAW 依赖是最大的阻挡因素**——这是程序本身的数据流决定的，硬件优化空间有限
-2. **Cross-cycle WAW (xWAW)** 在某些模式下很突出（如 fib 的寄存器复用模式）
-3. **novalid1（IFQ 没有第二条）** 在正常运行中占比很低，说明 IFQ 深度 8 足够
-4. **unsafe0 恒为 0**——slot0 的安全检查已完全放宽
-
-### 不可配对指令类型（nta）细分
-
-当 slot1 因为指令类型被阻挡时，进一步细分：
-
-| 类别 | 说明 | 典型场景 |
-|------|------|----------|
-| store | Store 指令 | 连续 SW 无法都走 slot1 |
-| branch | 条件分支 | 但已支持 slot1 branch |
-| jump | JAL/JALR | 函数调用/返回，**不可配对** |
-| other | ecall/mret | 特权指令 |
-
-> 注：早期版本 slot1 只支持纯 ALU 指令。后续 agent 逐步扩展了 slot1 对 load、store、branch 的支持，显著提升了双发射率。
+在那之前，我们必须先解决深管线的另一个天敌（系列第三篇）：分支预测迷雾。
 
 ---
-
-## 双发射的收益
-
-双发射对性能有多大提升？对比理论单发射 CPI（假设无 dual-issue）和实际 CPI：
-
-在 feature/ooo 分支（乱序执行）上，**6/9 benchmarks 达到 CPI < 1.0**，即 IPC > 1.0——这只有双发射才能做到。最高的 `fib_20` 达到 **1.54 IPC**，意味着平均每周期退休 1.54 条指令。
-
-即使在 main 分支（顺序执行），双发射也将大部分 benchmark 的 CPI 从 2.x 降到了 1.5-1.9 的范围。
-
----
-
-## 小结
-
-本篇介绍了双发射设计的核心要素：
-
-| 组件 | 要点 |
-|------|------|
-| **IFQ** | 8-entry 环形队列，每周期 push/pop 各最多 2 条 |
-| **配对规则** | 6 项检查：指令类型 + RAW + WAW + load-use + xWAW + store alias |
-| **Slot1 通道** | 1-cycle shortcut，独立 ALU + 前递网络 |
-| **Pair-block** | 最大瓶颈是 RAW 依赖（程序固有），其次是 xWAW |
-| **实测收益** | 峰值 73% 双发射率，IPC 最高 1.54 |
-
-下一篇将探讨**分支预测**——从 Bimodal 到 TAGE，如何将 30-50% 的 misprediction rate 压下来。
-
----
-
 *项目地址：[github.com/HaibinLai/simple-CPU](https://github.com/HaibinLai/simple-CPU)*
